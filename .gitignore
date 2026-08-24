@@ -1,0 +1,21 @@
+# Dependencies & Build artifacts
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+backend/.venv/
+.env
+.venv/
+venv/
+*.sqlite3
+
+# OS / IDE artifacts
+.DS_Store
+.vscode/
+.idea/
