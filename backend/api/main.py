@@ -7,7 +7,7 @@ Run with:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import stations, vehicles, anomalies, simulate
+from backend.api.routes import stations, vehicles, anomalies, simulate, kpis
 
 app = FastAPI(
     title="TRACE-TWIN API",
@@ -29,6 +29,8 @@ app.include_router(stations.router, prefix="/api/v1")
 app.include_router(vehicles.router, prefix="/api/v1")
 app.include_router(anomalies.router, prefix="/api/v1")
 app.include_router(simulate.router, prefix="/api/v1")
+app.include_router(kpis.router, prefix="/api/v1")
+
 
 
 @app.get("/")

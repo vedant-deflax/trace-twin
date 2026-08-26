@@ -93,3 +93,17 @@ class TickResponse(BaseModel):
     events_generated: int
     anomalies_detected: int
     message: str
+
+class VehicleListResponse(BaseModel):
+    id: str
+    model: Optional[str] = None
+    current_station: Optional[str] = None
+    status: str
+    is_in_blast_radius: bool = False
+
+class FactoryKPIsResponse(BaseModel):
+    active_line_velocity: float
+    fleet_defect_risk_pct: float
+    blind_stations_inferred: int
+    total_blind_stations: int
+    total_units_in_buffer: int

@@ -9,12 +9,11 @@ import random
 
 
 def infer_blind_stations(conn: sqlite3.Connection) -> int:
-    """Infer readings for all sensorless stations from neighbor data.
+    """Infer readings for all sensorless stations from nearest neighbor data.
 
-    For each blind station, finds vehicles that have events at both the
-    upstream (sequence_no - 1) and downstream (sequence_no + 1) stations
-    but no event at the blind station itself, and generates an inferred
-    event by averaging the neighbor readings.
+    Dynamically finds the closest upstream and downstream sensor-equipped
+    events for a vehicle, gracefully handling consecutive blind stations or
+    missing data.
 
     Returns:
         Number of inferred events created.
@@ -23,87 +22,92 @@ def infer_blind_stations(conn: sqlite3.Connection) -> int:
         "SELECT id, sequence_no, resource_id FROM stations WHERE has_sensors = 0"
     ).fetchall()
 
+    if not blind_stations:
+        return 0
+
     total_inferred = 0
 
-    for bs in blind_stations:
-        blind_id = bs["id"]
-        seq = bs["sequence_no"]
-        resource_id = bs["resource_id"]
+    # Process per vehicle
+    vehicles = conn.execute("SELECT id FROM vehicles").fetchall()
 
-        # Find upstream and downstream station IDs
-        upstream = conn.execute(
-            "SELECT id FROM stations WHERE sequence_no = ?", (seq - 1,)
-        ).fetchone()
-        downstream = conn.execute(
-            "SELECT id FROM stations WHERE sequence_no = ?", (seq + 1,)
-        ).fetchone()
+    from datetime import datetime, timedelta
 
-        if not upstream or not downstream:
-            continue
-
-        up_id = upstream["id"]
-        down_id = downstream["id"]
-
-        # Find vehicles that have events at both neighbors but not at blind station
-        vehicles = conn.execute(
-            "SELECT DISTINCT pe_up.vehicle_id "
-            "FROM process_events pe_up "
-            "JOIN process_events pe_down ON pe_down.vehicle_id = pe_up.vehicle_id "
-            "  AND pe_down.station_id = ? "
-            "WHERE pe_up.station_id = ? "
-            "AND pe_up.vehicle_id NOT IN ("
-            "  SELECT vehicle_id FROM process_events WHERE station_id = ?"
-            ")",
-            (down_id, up_id, blind_id),
+    for v in vehicles:
+        vid = v["id"]
+        # Fetch all actual (non-inferred) events for this vehicle
+        events = conn.execute(
+            "SELECT s.sequence_no, pe.station_id, pe.exited_at, pe.entered_at, "
+            "pe.cycle_time_sec, pe.vibration_mm_s, pe.temperature_c "
+            "FROM process_events pe "
+            "JOIN stations s ON s.id = pe.station_id "
+            "WHERE pe.vehicle_id = ? AND pe.is_inferred = 0 "
+            "ORDER BY s.sequence_no",
+            (vid,)
         ).fetchall()
 
-        for v in vehicles:
-            vid = v["vehicle_id"]
+        if not events:
+            continue
 
-            up_event = conn.execute(
-                "SELECT exited_at, cycle_time_sec, vibration_mm_s, temperature_c "
-                "FROM process_events WHERE vehicle_id = ? AND station_id = ? "
-                "ORDER BY entered_at DESC LIMIT 1",
-                (vid, up_id),
+        for bs in blind_stations:
+            b_id = bs["id"]
+            b_seq = bs["sequence_no"]
+            b_res = bs["resource_id"]
+
+            has_event = conn.execute(
+                "SELECT 1 FROM process_events WHERE vehicle_id = ? AND station_id = ?",
+                (vid, b_id)
             ).fetchone()
 
-            down_event = conn.execute(
-                "SELECT cycle_time_sec, vibration_mm_s, temperature_c "
-                "FROM process_events WHERE vehicle_id = ? AND station_id = ? "
-                "ORDER BY entered_at DESC LIMIT 1",
-                (vid, down_id),
-            ).fetchone()
+            if has_event:
+                continue
+
+            # Find closest upstream and downstream
+            up_event = None
+            down_event = None
+
+            for ev in reversed(events):
+                if ev["sequence_no"] < b_seq:
+                    up_event = ev
+                    break
+
+            for ev in events:
+                if ev["sequence_no"] > b_seq:
+                    down_event = ev
+                    break
 
             if not up_event or not down_event:
                 continue
 
-            # Interpolate readings
-            inf_ct  = ((up_event["cycle_time_sec"] or 0) + (down_event["cycle_time_sec"] or 0)) / 2
-            inf_vib = ((up_event["vibration_mm_s"] or 0) + (down_event["vibration_mm_s"] or 0)) / 2
-            inf_tmp = ((up_event["temperature_c"] or 0) + (down_event["temperature_c"] or 0)) / 2
+            try:
+                # Interpolate readings
+                inf_ct  = ((up_event["cycle_time_sec"] or 0) + (down_event["cycle_time_sec"] or 0)) / 2
+                inf_vib = ((up_event["vibration_mm_s"] or 0) + (down_event["vibration_mm_s"] or 0)) / 2
+                inf_tmp = ((up_event["temperature_c"] or 0) + (down_event["temperature_c"] or 0)) / 2
 
-            # Add small noise
-            inf_ct  += random.gauss(0, 1.0)
-            inf_vib += random.gauss(0, 0.05)
-            inf_tmp += random.gauss(0, 0.5)
+                # Add realistic industrial noise
+                inf_ct  += random.gauss(0, 1.0)
+                inf_vib += random.gauss(0, 0.05)
+                inf_tmp += random.gauss(0, 0.5)
 
-            # Compute timestamps
-            from datetime import datetime, timedelta
-            up_exit = datetime.fromisoformat(up_event["exited_at"])
-            transit = random.uniform(10, 15)
-            entered_at = up_exit + timedelta(seconds=transit)
-            exited_at  = entered_at + timedelta(seconds=inf_ct)
+                up_exit = datetime.fromisoformat(up_event["exited_at"])
+                transit = random.uniform(10, 15)
+                seq_gap = b_seq - up_event["sequence_no"]
+                
+                entered_at = up_exit + timedelta(seconds=transit * seq_gap)
+                exited_at  = entered_at + timedelta(seconds=max(inf_ct, 0))
 
-            conn.execute(
-                "INSERT INTO process_events "
-                "(vehicle_id, station_id, resource_id, entered_at, exited_at, "
-                "cycle_time_sec, vibration_mm_s, temperature_c, source_system, is_inferred) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'INFERRED', 1)",
-                (vid, blind_id, resource_id,
-                 entered_at.isoformat(), exited_at.isoformat(),
-                 round(inf_ct, 2), round(inf_vib, 3), round(inf_tmp, 2)),
-            )
-            total_inferred += 1
+                conn.execute(
+                    "INSERT INTO process_events "
+                    "(vehicle_id, station_id, resource_id, entered_at, exited_at, "
+                    "cycle_time_sec, vibration_mm_s, temperature_c, source_system, is_inferred) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'INFERRED', 1)",
+                    (vid, b_id, b_res,
+                     entered_at.isoformat(), exited_at.isoformat(),
+                     round(inf_ct, 2), round(inf_vib, 3), round(inf_tmp, 2)),
+                )
+                total_inferred += 1
+            except Exception:
+                continue
 
     conn.commit()
     return total_inferred

@@ -3,9 +3,45 @@
 from fastapi import APIRouter, HTTPException
 
 from backend.db.connection import get_async_connection
-from backend.api.models import VehicleDetailResponse, ProcessEventResponse
+from backend.api.models import VehicleDetailResponse, ProcessEventResponse, VehicleListResponse
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
+
+@router.get("", response_model=list[VehicleListResponse])
+async def list_vehicles():
+    """Get all active vehicles on the line."""
+    conn = await get_async_connection()
+    try:
+        # Get vehicles and their latest station
+        rows = await conn.execute_fetchall(
+            '''
+            SELECT v.id, v.model,
+                   (SELECT station_id FROM process_events pe WHERE pe.vehicle_id = v.id ORDER BY entered_at DESC LIMIT 1) as current_station,
+                   (SELECT COUNT(*) FROM blast_radius br WHERE br.vehicle_id = v.id) as blast_count
+            FROM vehicles v
+            ORDER BY v.line_entry_ts DESC
+            '''
+        )
+        
+        # We can deduce status from blast radius count or anomalies
+        # For simplicity, if blast_count > 0, status is 'critical'
+        results = []
+        for r in rows:
+            blast_count = r["blast_count"] or 0
+            status = 'normal'
+            if blast_count > 0:
+                status = 'critical'
+                
+            results.append(VehicleListResponse(
+                id=r["id"],
+                model=r["model"],
+                current_station=r["current_station"],
+                status=status,
+                is_in_blast_radius=(blast_count > 0)
+            ))
+        return results
+    finally:
+        await conn.close()
 
 
 @router.get("/{vehicle_id}", response_model=VehicleDetailResponse)

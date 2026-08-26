@@ -213,6 +213,13 @@ async def approve_anomaly(anomaly_id: int, body: ApproveRequest = ApproveRequest
             (update_action, anomaly_id),
         )
         await conn.commit()
+        
+        # Reset machine drift state
+        from backend.simulator.factory import fix_machine
+        fix_machine()
+
+        # Audit trail (could write to db, for now we log)
+        print(f"AUDIT TRAIL: User approved intervention '{update_action}' for Anomaly {anomaly_id}. Machine fixed.")
 
         return {
             "id": anomaly_id,

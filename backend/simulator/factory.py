@@ -40,6 +40,18 @@ TRANSIT_MIN = 10       # seconds between stations
 TRANSIT_MAX = 15
 VEHICLE_INTERVAL = 120 # seconds between vehicle entries (≈ 30/hr)
 
+MACHINE_FIXED = False
+
+def fix_machine():
+    """Globally marks the simulator machine as fixed, ending any ongoing drift."""
+    global MACHINE_FIXED
+    MACHINE_FIXED = True
+
+def reset_machine():
+    """Resets the simulator machine state."""
+    global MACHINE_FIXED
+    MACHINE_FIXED = False
+
 
 class FactorySimulator:
     """Generates synthetic process_event data for the assembly line."""
@@ -145,11 +157,19 @@ class FactorySimulator:
                 temperature = max(temperature, 15.0)
 
                 # ─── Anomaly injections ───
-                if sid == ANOMALY_STATION and ANOMALY_START_INDEX <= vi <= ANOMALY_END_INDEX:
-                    drift_mult = min(vi - ANOMALY_START_INDEX + 1, MAX_DRIFT_MULT)
-                    cycle_time  += DRIFT_CYCLE * drift_mult
-                    vibration   += DRIFT_VIB   * drift_mult
-                    temperature += DRIFT_TEMP  * drift_mult
+                if sid == ANOMALY_STATION and not MACHINE_FIXED:
+                    if vi < ANOMALY_START_INDEX:
+                        cycle_time = baseline["cycle_time"] + rng.normal(0, 0.45)
+                    elif ANOMALY_START_INDEX <= vi <= ANOMALY_END_INDEX:
+                        progress = (vi - ANOMALY_START_INDEX + 1) / (ANOMALY_END_INDEX - ANOMALY_START_INDEX + 1)
+                        cycle_time = baseline["cycle_time"] + 18.0 * (progress ** 1.5) + rng.normal(0, 0.45)
+                        drift_mult = min(vi - ANOMALY_START_INDEX + 1, MAX_DRIFT_MULT)
+                        vibration   += DRIFT_VIB   * drift_mult
+                        temperature += DRIFT_TEMP  * drift_mult
+                    else:
+                        cycle_time = 70.0 + rng.normal(0, 0.45)
+                        vibration   += DRIFT_VIB   * MAX_DRIFT_MULT
+                        temperature += DRIFT_TEMP  * MAX_DRIFT_MULT
                 elif sid == "STATION_24" and vi >= 10:
                     cycle_time += 7.0
                     vibration += 0.8
@@ -233,11 +253,19 @@ class FactorySimulator:
             is_inferred = 1
             source = "INFERRED"
 
-        if sid == ANOMALY_STATION and ANOMALY_START_INDEX <= vi <= ANOMALY_END_INDEX:
-            drift_mult = min(vi - ANOMALY_START_INDEX + 1, MAX_DRIFT_MULT)
-            cycle_time  += DRIFT_CYCLE * drift_mult
-            vibration   += DRIFT_VIB   * drift_mult
-            temperature += DRIFT_TEMP  * drift_mult
+        if sid == ANOMALY_STATION and not MACHINE_FIXED:
+            if vi < ANOMALY_START_INDEX:
+                cycle_time = baseline["cycle_time"] + rng.gauss(0, 0.45)
+            elif ANOMALY_START_INDEX <= vi <= ANOMALY_END_INDEX:
+                progress = (vi - ANOMALY_START_INDEX + 1) / (ANOMALY_END_INDEX - ANOMALY_START_INDEX + 1)
+                cycle_time = baseline["cycle_time"] + 18.0 * (progress ** 1.5) + rng.gauss(0, 0.45)
+                drift_mult = min(vi - ANOMALY_START_INDEX + 1, MAX_DRIFT_MULT)
+                vibration   += DRIFT_VIB   * drift_mult
+                temperature += DRIFT_TEMP  * drift_mult
+            else:
+                cycle_time = 70.0 + rng.gauss(0, 0.45)
+                vibration   += DRIFT_VIB   * MAX_DRIFT_MULT
+                temperature += DRIFT_TEMP  * MAX_DRIFT_MULT
         elif sid == "STATION_24" and vi >= 10:
             cycle_time += 7.0
             vibration += 0.8

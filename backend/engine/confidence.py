@@ -44,30 +44,32 @@ def compute_confidence(station_id: str, conn: sqlite3.Connection, residuals: dic
         # Legacy/Sensorless stations get a lower baseline coverage
         sensor_coverage_pct = 40.0
 
-    # 2. Dynamic Recency / Signal-to-Noise Score
-    # We use severity as a proxy for signal clarity. A huge deviation is unmistakable (high confidence).
-    # A minor deviation might be noise (lower confidence).
+    # 2. Dynamic Degradation for Adjacent Blind Stations
+    # Check if upstream or downstream stations are also blind
+    seq = station["sequence_no"]
+    adjacent = conn.execute(
+        "SELECT has_sensors FROM stations WHERE sequence_no IN (?, ?)",
+        (seq - 1, seq + 1)
+    ).fetchall()
+
+    missing_adjacent = sum(1 for a in adjacent if not a["has_sensors"])
     
-    # Overrides for specific prompt requirements
-    if station_id == "STATION_14":
-        return 94.0
-    if station_id == "STATION_24":
-        return 81.0
-    if station_id == "STATION_03":
-        return 74.0
-    if station_id == "STATION_09":
-        return 58.0
-    if station_id == "STATION_12":
-        return 88.0
+    # Penalize if adjacent stations lack sensors (limits interpolation confidence)
+    if missing_adjacent > 0:
+        sensor_coverage_pct -= (missing_adjacent * 15.0)
 
-    # Legacy / Sensorless
+    # 3. Dynamic Recency / Signal-to-Noise Score
+    # We use severity as a proxy for signal clarity. A huge deviation is unmistakable.
+    # Base confidence comes from coverage, scaled by severity.
+    
+    # If it's inferred, use a lower scale
     if not has_sensors:
-        # 55% - 68%
-        return round(55.0 + 13.0 * severity, 1)
+        confidence = sensor_coverage_pct + (20.0 * severity)
+    else:
+        confidence = (sensor_coverage_pct * 0.6) + (40.0 * severity)
 
-    # Minor anomalies (with sensors)
-    # 62% - 88%
-    return round(62.0 + 26.0 * severity, 1)
+    # Hard-floor and ceiling
+    return round(min(max(confidence, 10.0), 98.0), 1)
 
 
 def get_recommended_action(station_id: str, confidence: float, residuals: dict) -> str:
@@ -81,17 +83,6 @@ def get_recommended_action(station_id: str, confidence: float, residuals: dict) 
     Returns:
         Action string: 'physical_inspection', 'inspect_recalibrate', 'slow_station', 'monitor', etc.
     """
-    if station_id == "STATION_14":
-        return "inspect_recalibrate"
-    if station_id == "STATION_24":
-        return "torque_check"
-    if station_id == "STATION_03":
-        return "alignment_check"
-    if station_id == "STATION_09":
-        return "manual_inspect"
-    if station_id == "STATION_12":
-        return "monitor"
-
     # Compute a rough predicted risk from normalized residuals
     norm_ct   = min(abs(residuals.get("cycle_time", 0)) / 20.0, 1.0)
     norm_vib  = min(abs(residuals.get("vibration", 0)) / 3.0, 1.0)
@@ -102,6 +93,7 @@ def get_recommended_action(station_id: str, confidence: float, residuals: dict) 
     if confidence < 60:
         return "physical_inspection"
 
+    # Additional action thresholds
     if predicted_risk_pct > 80:
         return "inspect_recalibrate"
     elif predicted_risk_pct > 50:

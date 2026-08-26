@@ -102,3 +102,4 @@ CREATE INDEX IF NOT EXISTS idx_anomaly_status  ON anomalies(status);
 CREATE INDEX IF NOT EXISTS idx_br_anomaly     ON blast_radius(anomaly_id);
 CREATE INDEX IF NOT EXISTS idx_rc_anomaly     ON root_causes(anomaly_id);
 CREATE INDEX IF NOT EXISTS idx_wif_anomaly    ON what_if_scenarios(anomaly_id);
+CREATE INDEX IF NOT EXISTS idx_pe_station_entered ON process_events(station_id, entered_at);
