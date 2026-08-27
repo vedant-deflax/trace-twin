@@ -8,13 +8,15 @@ import sqlite3
 from datetime import datetime
 
 
-# Detection thresholds (absolute residuals)
-CYCLE_TIME_THRESHOLD = 5.0    # seconds
-VIBRATION_THRESHOLD  = 1.0    # mm/s
-TEMPERATURE_THRESHOLD = 5.0   # °C
+# Detection thresholds (absolute residuals).
+# Jitter widths: CT ±0.6 s, VIB ±0.12 mm/s, TEMP ±0.8 °C  →  thresholds well above noise floor.
+# Station 14 peak drift: +14.2 s / +2.6 mm/s / +9.5 °C  →  guaranteed breach.
+CYCLE_TIME_THRESHOLD  = 4.0    # seconds  (well above 0.6 σ noise)
+VIBRATION_THRESHOLD   = 0.8    # mm/s     (well above 0.12 σ noise)
+TEMPERATURE_THRESHOLD = 4.0    # °C       (well above 0.8 σ noise)
 
-# Number of consecutive normal events to auto-resolve an anomaly
-RESOLVE_STREAK = 5
+# Consecutive normal events required before auto-resolving an anomaly
+RESOLVE_STREAK = 3
 
 
 def detect_anomalies(conn: sqlite3.Connection) -> list[dict]:

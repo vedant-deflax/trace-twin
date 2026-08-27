@@ -1,18 +1,28 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useStream } from "@/context/StreamContext";
 import { fetchAPI } from "@/lib/api";
 import { Activity, ShieldAlert, CheckCircle, Search, Info } from "lucide-react";
 
-export default function VehicleDeepDivePage() {
+function VehicleDeepDiveContent() {
+  const searchParams = useSearchParams();
   const { vehicles, stations, anomalies, loading } = useStream();
-  const [selectedVid, setSelectedVid] = useState<string>("VEH_4821");
+  const [selectedVid, setSelectedVid] = useState<string>(searchParams.get("vehicleId") || "VEH_4821");
   const [selectedSeq, setSelectedSeq] = useState<number>(14);
   const [vehicleDetail, setVehicleDetail] = useState<any>(null);
   
   const sortedStations = [...stations].sort((a, b) => a.sequence_no - b.sequence_no);
   
+  useEffect(() => {
+    // If param changes, update it
+    const paramId = searchParams.get("vehicleId");
+    if (paramId) {
+      setSelectedVid(paramId);
+    }
+  }, [searchParams]);
+
   useEffect(() => {
     async function loadDetails() {
       if (!selectedVid) return;
@@ -263,5 +273,13 @@ export default function VehicleDeepDivePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function VehicleDeepDivePage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-white">Loading Inspector...</div>}>
+      <VehicleDeepDiveContent />
+    </Suspense>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { useStream } from "@/context/StreamContext";
 import { AlertTriangle, CheckCircle, ShieldAlert } from "lucide-react";
 
@@ -23,12 +24,13 @@ export default function VehiclesPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {vehicles.map((v) => (
-          <div key={v.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col relative overflow-hidden">
-            {v.is_in_blast_radius && (
-              <div className="absolute top-0 left-0 right-0 bg-red-600 text-white text-[9px] font-bold py-1 text-center animate-pulse">
-                BLAST RADIUS CONTAINMENT REQUIRED
-              </div>
-            )}
+          <Link key={v.id} href={`/vehicle-deep-dive?vehicleId=${v.id}`} className="block">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col relative overflow-hidden hover:border-cyan-400 hover:scale-[1.02] cursor-pointer transition duration-150 h-full">
+              {v.is_in_blast_radius && (
+                <div className="absolute top-0 left-0 right-0 bg-red-600 text-white text-[9px] font-bold py-1 text-center animate-pulse">
+                  BLAST RADIUS CONTAINMENT REQUIRED
+                </div>
+              )}
             <div className={`mt-4 flex items-center justify-between mb-3`}>
               <span className="text-lg font-mono font-bold text-white">{v.id.replace("VEH_", "#")}</span>
               <span className={`px-2 py-1 rounded text-xs font-bold ${
@@ -57,6 +59,7 @@ export default function VehiclesPage() {
               </div>
             </div>
           </div>
+          </Link>
         ))}
       </div>
     </div>
