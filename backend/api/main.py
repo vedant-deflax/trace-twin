@@ -7,7 +7,9 @@ Run with:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import stations, vehicles, anomalies, simulate, kpis
+from backend.api.routes import stations, vehicles, anomalies, simulate, kpis, stream
+from backend.simulator.streamer import streamer
+import asyncio
 
 app = FastAPI(
     title="TRACE-TWIN API",
@@ -24,12 +26,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(streamer.start())
+
 # Mount routers
 app.include_router(stations.router, prefix="/api/v1")
 app.include_router(vehicles.router, prefix="/api/v1")
 app.include_router(anomalies.router, prefix="/api/v1")
 app.include_router(simulate.router, prefix="/api/v1")
 app.include_router(kpis.router, prefix="/api/v1")
+app.include_router(stream.router, prefix="/api/v1")
 
 
 

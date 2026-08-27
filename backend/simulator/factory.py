@@ -122,8 +122,15 @@ class FactorySimulator:
 
             prev_exit = entry_ts
             prev_readings: dict | None = None
+            
+            # Space out vehicles: #4821 (vi=11) should be at S24 (index 23)
+            # So target_station_idx = 34 - vi.
+            target_station_idx = 34 - vi
 
-            for station in self.stations:
+            for si, station in enumerate(self.stations):
+                if si > target_station_idx:
+                    break
+
                 sid = station["id"]
                 baseline = self.baselines[sid]
 
