@@ -83,6 +83,7 @@ async def get_vehicle(vehicle_id: str):
                     cycle_time_sec=e["cycle_time_sec"],
                     vibration_mm_s=e["vibration_mm_s"],
                     temperature_c=e["temperature_c"],
+                    torque_nm=e["torque_nm"],
                     source_system=e["source_system"],
                     is_inferred=bool(e["is_inferred"]),
                 )

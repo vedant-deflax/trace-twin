@@ -219,8 +219,8 @@ export default function CommandCenterPage() {
             {/* Carousel */}
             <div className="flex gap-3 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
               {vehicles.map(v => {
-                const isCritical = v.id === "VEH_4821";
-                const isBlast = blastRadiusVehicles.includes(v.id) || v.is_in_blast_radius;
+                const isCritical = (v as any).status === 'critical';
+                const isBlast = (v as any).status === 'warning' || blastRadiusVehicles.includes(v.id) || (v as any).is_in_blast_radius;
                 
                 return (
                   <div key={v.id} className={`shrink-0 w-32 rounded-lg border p-3 flex flex-col items-center justify-center transition-all ${

@@ -49,6 +49,8 @@ export default function VehiclesPage() {
                 <span className="w-16">Health:</span>
                 {v.status === 'critical' ? (
                   <span className="text-red-400 flex items-center gap-1"><ShieldAlert className="w-3 h-3"/> Anomalous Exposure</span>
+                ) : v.status === 'warning' ? (
+                  <span className="text-amber-400 flex items-center gap-1"><AlertTriangle className="w-3 h-3"/> At Risk (Blast Radius)</span>
                 ) : (
                   <span className="text-green-400 flex items-center gap-1"><CheckCircle className="w-3 h-3"/> Passing</span>
                 )}

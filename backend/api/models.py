@@ -29,6 +29,7 @@ class ProcessEventResponse(BaseModel):
     cycle_time_sec: Optional[float] = None
     vibration_mm_s: Optional[float] = None
     temperature_c: Optional[float] = None
+    torque_nm: Optional[float] = None
     source_system: Optional[str] = None
     is_inferred: bool = False
 

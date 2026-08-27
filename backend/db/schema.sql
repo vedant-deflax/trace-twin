@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS process_events (
     cycle_time_sec  REAL,
     vibration_mm_s  REAL,
     temperature_c   REAL,
+    torque_nm       REAL,
     source_system   TEXT,              -- 'MES' | 'PLC' | 'QUALITY' | 'INFERRED'
     is_inferred     INTEGER DEFAULT 0  -- 1 when Blind Station Inference used
 );

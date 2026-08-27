@@ -31,6 +31,7 @@ export interface ProcessEvent {
   cycle_time_sec: number | null;
   vibration_mm_s: number | null;
   temperature_c: number | null;
+  torque_nm: number | null;
   source_system: string | null;
   is_inferred: boolean;
 }

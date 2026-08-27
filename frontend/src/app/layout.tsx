@@ -37,6 +37,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
                   Digital Thread
                 </a>
+                <a href="/vehicle-deep-dive" className="flex items-center gap-2 px-3 py-2 rounded-md text-gray-300 hover:text-white hover:bg-white/5 transition-colors">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                  Vehicle Deep Dive
+                </a>
                 <a href="/what-if" className="flex items-center gap-2 px-3 py-2 rounded-md text-gray-300 hover:text-white hover:bg-white/5 transition-colors">
                   <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
                   What-If Simulator
