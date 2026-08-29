@@ -55,22 +55,22 @@ def compute_what_if(
 
     scenarios = [
         {
-            "scenario_label": "continue",
-            "projected_throughput_impact": 0.0,
-            "projected_defect_containment": round(min(max(15.0, 5 * severity_factor), 30.0), 1),
+            "scenario_label": "Reroute",
+            "projected_throughput_impact": -6.0,
+            "projected_defect_containment": 70.0,
             "is_recommended": False,
         },
         {
-            "scenario_label": "slow_station",
-            "projected_throughput_impact": -round(throughput_baseline * 0.12, 1),
-            "projected_defect_containment": round(55 + 10 * min(severity_factor, 2.0), 1),
-            "is_recommended": not recommend_inspect and predicted_risk_pct > 50,
+            "scenario_label": "Slow Line Speed",
+            "projected_throughput_impact": -12.0,
+            "projected_defect_containment": 85.0,
+            "is_recommended": False,
         },
         {
-            "scenario_label": "inspect_recalibrate",
-            "projected_throughput_impact": -round(throughput_baseline * 0.30, 1),
-            "projected_defect_containment": 95.0,
-            "is_recommended": recommend_inspect,
+            "scenario_label": "Emergency E-Stop",
+            "projected_throughput_impact": -28.0,
+            "projected_defect_containment": 100.0,
+            "is_recommended": True,
         },
     ]
 

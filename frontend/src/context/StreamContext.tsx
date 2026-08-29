@@ -7,6 +7,7 @@ interface StreamContextProps {
   stations: Station[];
   anomalies: AnomalyListItem[];
   vehicles: VehicleListItem[];
+  completedVehicles: VehicleListItem[];
   kpis: FactoryKPIs | null;
   loading: boolean;
   error: string | null;
@@ -19,6 +20,7 @@ export function StreamProvider({ children }: { children: React.ReactNode }) {
   const [stations, setStations] = useState<Station[]>([]);
   const [anomalies, setAnomalies] = useState<AnomalyListItem[]>([]);
   const [vehicles, setVehicles] = useState<VehicleListItem[]>([]);
+  const [completedVehicles, setCompletedVehicles] = useState<VehicleListItem[]>([]);
   const [kpis, setKpis] = useState<FactoryKPIs | null>(null);
   
   const [loading, setLoading] = useState(true);
@@ -40,6 +42,7 @@ export function StreamProvider({ children }: { children: React.ReactNode }) {
           if (data.stations) setStations(data.stations);
           if (data.anomalies) setAnomalies(data.anomalies);
           if (data.vehicles) setVehicles(data.vehicles);
+          if (data.completed_vehicles) setCompletedVehicles(data.completed_vehicles);
           if (data.kpis) setKpis(data.kpis);
           setLoading(false);
           setError(null);
@@ -61,7 +64,7 @@ export function StreamProvider({ children }: { children: React.ReactNode }) {
   }, [refreshKey]);
 
   return (
-    <StreamContext.Provider value={{ stations, anomalies, vehicles, kpis, loading, error, forceRefresh }}>
+    <StreamContext.Provider value={{ stations, anomalies, vehicles, completedVehicles, kpis, loading, error, forceRefresh }}>
       {children}
     </StreamContext.Provider>
   );

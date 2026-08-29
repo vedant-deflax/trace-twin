@@ -108,3 +108,19 @@ class FactoryKPIsResponse(BaseModel):
     blind_stations_inferred: int
     total_blind_stations: int
     total_units_in_buffer: int
+
+
+class DiagnosticResponse(BaseModel):
+    vehicle_id: str
+    station_seq: int
+    station_id: str
+    station_name: str
+    status: str  # "CRITICAL", "WARNING", "HEALTHY"
+    severity_color: str  # "red", "amber", "green"
+    confidence_score: float
+    key_contributors: list[str]
+    retrieved_context: list[str]
+    primary_root_cause: str
+    causal_mechanism: str
+    containment_action: str
+    telemetry_summary: dict

@@ -1,9 +1,12 @@
-"""Vehicles API routes for TRACE-TWIN."""
+from fastapi import APIRouter, HTTPException, Query
 
-from fastapi import APIRouter, HTTPException
-
-from backend.db.connection import get_async_connection
-from backend.api.models import VehicleDetailResponse, ProcessEventResponse, VehicleListResponse
+from backend.db.connection import get_async_connection, get_sync_connection
+from backend.api.models import (
+    VehicleDetailResponse,
+    ProcessEventResponse,
+    VehicleListResponse,
+    DiagnosticResponse,
+)
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 
@@ -92,3 +95,19 @@ async def get_vehicle(vehicle_id: str):
         )
     finally:
         await conn.close()
+
+
+@router.get("/{vehicle_id}/diagnostics", response_model=DiagnosticResponse)
+async def get_vehicle_diagnostics(
+    vehicle_id: str,
+    station_seq: int = Query(14, ge=1, le=30),
+):
+    """Get ML-driven diagnostic summary & RAG root-cause explainer for vehicle at station_seq."""
+    from backend.engine.diagnostic_rag import diagnose_vehicle_at_station
+    conn = get_sync_connection()
+    try:
+        diag = diagnose_vehicle_at_station(vehicle_id, station_seq, conn)
+        return DiagnosticResponse(**diag)
+    finally:
+        conn.close()
+

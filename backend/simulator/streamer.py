@@ -1,78 +1,249 @@
 """Live simulation tick engine for TRACE-TWIN.
 
-Drives the factory simulation loop at 2.5 s/tick.  On every tick:
-  1. Write active vehicle process events to SQLite.
-  2. Run the anomaly-detection / enrichment pipeline.
-  3. Rebuild GLOBAL_STATE — the snapshot broadcast via SSE.
-
-Station 14 "CRITICAL" override is injected directly into GLOBAL_STATE
-so the conveyor bar lights red immediately, without waiting for the
-pipeline's rolling-window detector to warm up.
+Drives the factory simulation loop at 2.5 s/tick.
+Implements an active, dynamic anomaly lifecycle manager across all 30 stations:
+  1. Tool Wear Drift on torque/press stations (S01, S02, S07, S08, S14, S26, S27)
+  2. Thermal Excursions on curing/sealing stations (S09, S11, S17, S18)
+  3. Micro-Stoppages: pneumatic delays (+15s Cycle Time, turning AMBER)
+  4. Dynamic Correlated Blast Radius:
+     - Chassis inside breach station -> CRITICAL (Red)
+     - 3 chassis immediately upstream and downstream -> WARNING (Amber)
+  5. Interactive What-If Scenario Execution -> Resets station to nominal (Δ = 0)
 """
 
 import asyncio
 import random
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Set
 
 from backend.db.connection import get_sync_connection
+from backend.db.init_db import STATIONS, BASELINES
 from backend.simulator.dataset_generator import (
     generate_vehicle_cohort,
-    ANOMALY_STATION,
-    ANOMALY_START_VI,
-    ANOMALY_PEAK_VI,
-    ANOMALY_END_VI,
-    DRIFT_CYCLE_TIME,
-    DRIFT_VIBRATION,
-    DRIFT_TEMPERATURE,
     BASE_TORQUE_NM,
 )
 from backend.engine.pipeline import run_full_pipeline
+from backend.engine.anomaly_detector import resolve_station_anomaly
 
-# ── Blast radius vehicle sets ────────────────────────────────────────────────
-CRITICAL_VID = "VEH_4821"
-WARNING_VIDS  = {
-    "VEH_4817", "VEH_4818", "VEH_4819", "VEH_4820",
-    "VEH_4822", "VEH_4823", "VEH_4824", "VEH_4825",
-}
+# Station classification sets
+TORQUE_STATIONS = {1, 2, 7, 8, 14, 26, 27}
+CURING_STATIONS = {9, 11, 17, 18}
 
 # Global state broadcasted via SSE
 GLOBAL_STATE: Dict[str, Any] = {
     "stations": [],
     "anomalies": [],
-    "vehicles":  [],
-    "kpis":      {},
+    "vehicles": [],
+    "completed_vehicles": [],
+    "kpis": {},
 }
 
 
 class SimulationStreamer:
     def __init__(self):
         self.tick_index = 0
-        self.cohort = generate_vehicle_cohort(num_vehicles=50, start_id=4801)
+        self.cohort = generate_vehicle_cohort(num_vehicles=300, start_id=4800)
+
+        # ── Anomaly Lifecycle Manager State Across All 30 Stations ────────────
+        # Tool wear accumulation state (wear >= 2.2 triggers 3-sigma CRITICAL breach)
+        self.station_wear_state = {s: 0.0 for s in range(1, 31)}
+        # Initialize Station 14 with active tool wear drift past 3-sigma on startup
+        self.station_wear_state[14] = 3.0
+        self.station_wear_state[7] = 1.3
+        self.station_wear_state[26] = 0.8
+
+        # Thermal excursions: dict of seq -> {"ticks_remaining": int, "temp_spike": float}
+        self.thermal_excursions: Dict[int, Dict[str, Any]] = {}
+
+        # Micro-stoppages: dict of seq -> {"ticks_remaining": int, "delay_sec": float}
+        self.micro_stoppages: Dict[int, Dict[str, Any]] = {}
+
+        # 1/f Pink noise state & ambient drift
+        self.station_thermal_drift = {s: 0.0 for s in range(1, 31)}
+        self.pink_noise_state = {
+            s: {"ct": 0.0, "vib": 0.0, "temp": 0.0, "torque": 0.0}
+            for s in range(1, 31)
+        }
+
+    def _sample_non_stationary_noise(self, s: int) -> dict:
+        """Sample non-stationary sensor noise (1/f pink noise, thermal accumulation)."""
+        pn = self.pink_noise_state.setdefault(
+            s, {"ct": 0.0, "vib": 0.0, "temp": 0.0, "torque": 0.0}
+        )
+        pn["ct"] = 0.85 * pn["ct"] + random.gauss(0, 0.25)
+        pn["vib"] = 0.85 * pn["vib"] + random.gauss(0, 0.03)
+        pn["temp"] = 0.90 * pn["temp"] + random.gauss(0, 0.12)
+        pn["torque"] = 0.85 * pn["torque"] + random.gauss(0, 0.35)
+
+        self.station_thermal_drift[s] = max(
+            -1.2, min(5.5, self.station_thermal_drift.get(s, 0.0) + random.uniform(-0.02, 0.04))
+        )
+
+        return {
+            "ct": pn["ct"],
+            "vib": pn["vib"] + (self.station_wear_state.get(s, 0.0) * 0.15),
+            "temp": pn["temp"] + self.station_thermal_drift[s],
+            "torque": pn["torque"],
+        }
+
+    def _get_vehicle(self, vi: int) -> dict:
+        """Get vehicle from cohort or generate on the fly with realistic physics."""
+        while vi >= len(self.cohort):
+            next_vi = len(self.cohort)
+            vid = f"VEH_{4800 + next_vi}"
+            events = []
+            material_hardness = float(random.gauss(1.0, 0.04))
+            for s in range(1, 31):
+                sid = f"STATION_{s:02d}"
+                res_id = f"R{s:02d}"
+                has_sensors = 0 if s in {4, 9, 16, 22, 27} else 1
+                base_ct = 65.0 + (s % 5) * 2.5
+                base_vib = 1.4 + (s * 0.03)
+                base_temp = 36.0 + (s * 0.4)
+                base_torque = 42.0 if s in TORQUE_STATIONS else 0.0
+
+                ns = self._sample_non_stationary_noise(s)
+                ct = base_ct + ns["ct"]
+                vib = (base_vib + ns["vib"]) * material_hardness
+                temp = base_temp + ns["temp"]
+                torque = (base_torque + ns["torque"]) * material_hardness if base_torque > 0 else 0.0
+
+                events.append({
+                    "vehicle_id": vid,
+                    "station_id": sid,
+                    "resource_id": res_id,
+                    "sequence_no": s,
+                    "cycle_time_sec": round(max(1.0, ct), 2),
+                    "vibration_mm_s": round(max(0.01, vib), 3),
+                    "temperature_c": round(max(15.0, temp), 2),
+                    "torque_nm": round(max(10.0, torque), 2) if torque > 0 else BASE_TORQUE_NM,
+                    "is_inferred": 1 if has_sensors == 0 else 0,
+                    "has_sensors": has_sensors,
+                    "is_anomaly": 0,
+                    "anomaly_label": "NOMINAL",
+                    "timestamp": datetime.now().isoformat(),
+                })
+            self.cohort.append({
+                "vehicle_id": vid,
+                "model": "Model-X",
+                "events": events,
+            })
+        return self.cohort[vi]
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     async def start(self):
-        """Wipe DB, reseed, fast-forward, then loop every 2.5 s."""
+        """Wipe DB, reseed, fast-forward to steady state (tick 34), then loop every 2.5 s."""
         import backend.db.init_db as init_db
-        init_db.init_db()                     # always flush stale data on startup
+        init_db.init_db()
 
-        # Fast-forward so Station 14 anomaly vehicles are already in-flight
-        for _ in range(25):
+        self.tick_index = 0
+        for _ in range(34):
             await asyncio.to_thread(self._process_tick)
 
         while True:
             await asyncio.sleep(2.5)
             await asyncio.to_thread(self._process_tick)
 
+    # ── Interactive Intervention Execution ────────────────────────────────────
+    def execute_action(
+        self, station_id: str, scenario_label: str, anomaly_id: Optional[int] = None
+    ) -> dict:
+        """Execute what-if intervention on a target station.
+
+        Resets accumulated tool wear, thermal drift, and active excursions back to 0.
+        Transitions the station to GREEN within 2 ticks (immediately on next cycle)
+        and clears the affected blast radius cohort.
+        """
+        try:
+            seq = int(station_id.replace("STATION_", ""))
+        except Exception:
+            seq = 14
+
+        # Reset station wear and thermal drift back to baseline
+        self.station_wear_state[seq] = 0.0
+        self.station_thermal_drift[seq] = 0.0
+        self.thermal_excursions.pop(seq, None)
+        self.micro_stoppages.pop(seq, None)
+        self.pink_noise_state[seq] = {"ct": 0.0, "vib": 0.0, "temp": 0.0, "torque": 0.0}
+
+        # Resolve open anomaly in SQLite
+        conn = get_sync_connection()
+        resolve_station_anomaly(conn, station_id)
+        if anomaly_id:
+            conn.execute(
+                "UPDATE anomalies SET status = 'resolved', window_end = datetime('now') WHERE id = ?",
+                (anomaly_id,),
+            )
+            conn.execute("DELETE FROM blast_radius WHERE anomaly_id = ?", (anomaly_id,))
+        else:
+            conn.execute(
+                "DELETE FROM blast_radius WHERE anomaly_id IN "
+                "(SELECT id FROM anomalies WHERE station_id = ?)",
+                (station_id,),
+            )
+        conn.commit()
+
+        # Immediately update global state snapshot
+        self._update_global_state(conn, [])
+        conn.close()
+
+        print(f"ACTION EXECUTED: '{scenario_label}' on {station_id}. Telemetry reset to baseline (Δ=0).")
+        return {
+            "status": "success",
+            "message": f"Action '{scenario_label}' executed at {station_id}. Station telemetry reset to baseline.",
+            "station_id": station_id,
+            "scenario_label": scenario_label,
+        }
+
     # ── Tick ──────────────────────────────────────────────────────────────────
     def _process_tick(self):
         conn = get_sync_connection()
-        now  = datetime.now()
+        now = datetime.now()
 
+        # ── 1. Anomaly Lifecycle Progression Across All 30 Stations ───────────
+        # Tool wear accumulation on torque/press stations
+        for s in TORQUE_STATIONS:
+            if self.station_wear_state.get(s, 0.0) > 0:
+                self.station_wear_state[s] += random.uniform(0.003, 0.008)
+            else:
+                # Slowly accumulates after reset
+                self.station_wear_state[s] += random.uniform(0.0005, 0.0015)
+
+        # Thermal excursions countdown & stochastic spawn
+        for s in list(self.thermal_excursions.keys()):
+            self.thermal_excursions[s]["ticks_remaining"] -= 1
+            if self.thermal_excursions[s]["ticks_remaining"] <= 0:
+                del self.thermal_excursions[s]
+
+        if len(self.thermal_excursions) == 0 and random.random() < 0.04:
+            c_station = random.choice(list(CURING_STATIONS))
+            self.thermal_excursions[c_station] = {
+                "ticks_remaining": random.randint(5, 8),
+                "temp_spike": random.uniform(8.5, 12.0),
+            }
+
+        # Micro-stoppages countdown & stochastic spawn (~0.2% per tick)
+        for s in list(self.micro_stoppages.keys()):
+            self.micro_stoppages[s]["ticks_remaining"] -= 1
+            if self.micro_stoppages[s]["ticks_remaining"] <= 0:
+                del self.micro_stoppages[s]
+
+        if len(self.micro_stoppages) == 0 and random.random() < 0.003:
+            rand_s = random.randint(1, 30)
+            self.micro_stoppages[rand_s] = {
+                "ticks_remaining": random.randint(2, 3),
+                "delay_sec": random.uniform(14.0, 16.5),
+            }
+
+        # ── 2. Write Active Process Events to SQLite ──────────────────────────
         active_events = []
-        for vi, vehicle in enumerate(self.cohort):
+        start_vi = max(0, self.tick_index - 29)
+        end_vi = self.tick_index + 1
+        for vi in range(start_vi, end_vi):
+            vehicle = self._get_vehicle(vi)
             si = self.tick_index - vi
             if 0 <= si < 30:
+                seq = si + 1
                 evt = vehicle["events"][si]
                 active_events.append((vehicle, evt, vi))
 
@@ -83,7 +254,31 @@ class SimulationStreamer:
                         (vehicle["vehicle_id"], vehicle["model"], now.isoformat()),
                     )
 
-                entered = now - timedelta(seconds=evt["cycle_time_sec"])
+                # Physical drift contributions
+                wear = self.station_wear_state.get(seq, 0.0)
+                wear_ct = (wear * 3.8) if wear >= 2.2 else (wear * 0.4)
+                wear_vib = (wear * 0.72) if wear >= 2.2 else (wear * 0.1)
+                wear_temp = (wear * 2.2) if wear >= 2.2 else (wear * 0.3)
+                wear_torque = (wear * 2.0) if (wear >= 2.2 and seq in TORQUE_STATIONS) else 0.0
+
+                excursion_temp = (
+                    self.thermal_excursions[seq]["temp_spike"]
+                    if seq in self.thermal_excursions
+                    else 0.0
+                )
+                stoppage_ct = (
+                    self.micro_stoppages[seq]["delay_sec"]
+                    if seq in self.micro_stoppages
+                    else 0.0
+                )
+
+                ns = self._sample_non_stationary_noise(seq)
+                ct_val = round(max(1.0, evt["cycle_time_sec"] + wear_ct + stoppage_ct + ns["ct"] * 0.3), 2)
+                vib_val = round(max(0.01, evt["vibration_mm_s"] + wear_vib + ns["vib"] * 0.3), 3)
+                temp_val = round(max(15.0, evt["temperature_c"] + wear_temp + excursion_temp + ns["temp"] * 0.2), 2)
+                torque_val = round(max(10.0, evt["torque_nm"] + wear_torque + ns["torque"] * 0.3), 2)
+
+                entered = now - timedelta(seconds=ct_val)
                 conn.execute(
                     "INSERT INTO process_events "
                     "(vehicle_id, station_id, resource_id, "
@@ -94,8 +289,7 @@ class SimulationStreamer:
                     (
                         vehicle["vehicle_id"], evt["station_id"], evt["resource_id"],
                         entered.isoformat(), now.isoformat(),
-                        evt["cycle_time_sec"], evt["vibration_mm_s"],
-                        evt["temperature_c"], evt["torque_nm"],
+                        ct_val, vib_val, temp_val, torque_val,
                         "INFERRED" if evt["is_inferred"] else "MES",
                         evt["is_inferred"],
                     ),
@@ -112,218 +306,309 @@ class SimulationStreamer:
 
     # ── State builder ─────────────────────────────────────────────────────────
     def _update_global_state(self, conn, active_events: list):
-        """Rebuild GLOBAL_STATE from DB + forced Station 14 override."""
+        """Rebuild GLOBAL_STATE with dynamic multi-station anomalies and correlated blast radius."""
 
-        # ── Determine if Station 14 anomaly window is currently active ────────
-        active_vi_set = {vi for (_, _, vi) in active_events}
-        s14_active = any(
-            ANOMALY_START_VI <= vi <= ANOMALY_END_VI for vi in active_vi_set
-        )
-        # Find peak intensity vehicle currently at S14 (highest intensity wins)
-        s14_intensity = 0.0
-        for (vehicle, evt, vi) in active_events:
-            if evt["station_id"] == ANOMALY_STATION and ANOMALY_START_VI <= vi <= ANOMALY_END_VI:
-                if vi <= ANOMALY_PEAK_VI:
-                    intensity = (vi - ANOMALY_START_VI) / float(ANOMALY_PEAK_VI - ANOMALY_START_VI)
-                else:
-                    intensity = (ANOMALY_END_VI - vi) / float(ANOMALY_END_VI - ANOMALY_PEAK_VI)
-                s14_intensity = max(s14_intensity, intensity)
-
-        # ── 1. Stations ───────────────────────────────────────────────────────
+        # ── 1. Evaluate All 30 Stations Dynamically ───────────────────────────
         stations = []
+        anomalous_stations = []
+
         for row in conn.execute("SELECT * FROM stations ORDER BY sequence_no"):
             s = dict(row)
+            sid = s["id"]
+            seq = s.get("sequence_no", 1)
+
             bl_row = conn.execute(
-                "SELECT * FROM station_baselines WHERE station_id = ?", (s["id"],)
+                "SELECT * FROM station_baselines WHERE station_id = ?", (sid,)
             ).fetchone()
             s["baseline"] = dict(bl_row) if bl_row else {}
+            bl = s["baseline"]
 
-            # Latest telemetry from DB
-            evt = conn.execute(
-                "SELECT cycle_time_sec, vibration_mm_s, temperature_c, torque_nm "
-                "FROM process_events WHERE station_id = ? "
-                "ORDER BY exited_at DESC LIMIT 1",
-                (s["id"],),
-            ).fetchone()
+            base_ct = bl.get("expected_cycle_time_sec", 65.0)
+            base_vib = bl.get("expected_vibration_mm_s", 1.8)
+            base_temp = bl.get("expected_temperature_c", 40.0)
+            base_torque = 42.0 if seq in TORQUE_STATIONS else BASE_TORQUE_NM
 
-            if evt:
-                s["cycle_time"]  = evt["cycle_time_sec"]
-                s["vibration"]   = evt["vibration_mm_s"]
-                s["temperature"] = evt["temperature_c"]
-                s["torque"]      = evt["torque_nm"]
+            wear = self.station_wear_state.get(seq, 0.0)
+            wear_ct = (wear * 3.8) if wear >= 2.2 else (wear * 0.4)
+            wear_vib = (wear * 0.72) if wear >= 2.2 else (wear * 0.1)
+            wear_temp = (wear * 2.2) if wear >= 2.2 else (wear * 0.3)
+            wear_torque = (wear * 2.0) if (wear >= 2.2 and seq in TORQUE_STATIONS) else 0.0
+
+            excursion_temp = (
+                self.thermal_excursions[seq]["temp_spike"]
+                if seq in self.thermal_excursions
+                else 0.0
+            )
+            stoppage_ct = (
+                self.micro_stoppages[seq]["delay_sec"]
+                if seq in self.micro_stoppages
+                else 0.0
+            )
+
+            ns = self._sample_non_stationary_noise(seq)
+            live_ct = round(base_ct + wear_ct + stoppage_ct + ns["ct"], 1)
+            live_vib = round(max(0.08, base_vib + wear_vib + ns["vib"]), 2)
+            live_temp = round(base_temp + wear_temp + excursion_temp + ns["temp"], 1)
+            live_torque = round(max(10.0, base_torque + wear_torque + ns["torque"]), 1)
+
+            # Determine dynamic station status
+            is_wear_critical = (wear >= 2.2 and seq in TORQUE_STATIONS)
+            is_temp_critical = (excursion_temp >= 6.0)
+            is_stoppage_warning = (stoppage_ct > 0)
+
+            if is_wear_critical or is_temp_critical:
+                status = "anomaly"
+            elif is_stoppage_warning or (wear >= 1.2):
+                status = "warning"
             else:
-                bl = s["baseline"]
-                s["cycle_time"]  = bl.get("expected_cycle_time_sec", 0)
-                s["vibration"]   = bl.get("expected_vibration_mm_s", 0)
-                s["temperature"] = bl.get("expected_temperature_c", 0)
-                s["torque"]      = BASE_TORQUE_NM
+                status = "normal"
 
-            # ── Force Station 14 into CRITICAL when anomaly window is active ──
-            if s["id"] == ANOMALY_STATION and s14_active and s14_intensity > 0:
-                bl = s["baseline"]
-                noise = random.gauss(0, 0.4)
-                s["cycle_time"]  = round((bl.get("expected_cycle_time_sec", 52)
-                                          + DRIFT_CYCLE_TIME * s14_intensity + noise), 1)
-                s["vibration"]   = round((bl.get("expected_vibration_mm_s", 2.8)
-                                          + DRIFT_VIBRATION * s14_intensity
-                                          + random.gauss(0, 0.05)), 2)
-                s["temperature"] = round((bl.get("expected_temperature_c", 58)
-                                          + DRIFT_TEMPERATURE * s14_intensity
-                                          + random.gauss(0, 0.3)), 1)
-                s["torque"]      = round(BASE_TORQUE_NM + 6.0 * s14_intensity
-                                         + random.gauss(0, 0.5), 1)
-                s["status"]          = "anomaly"
-                s["confidence_score"] = round(78 + s14_intensity * 9 + random.uniform(-2, 2), 1)
-                s["root_causes"]     = [
-                    {"cause_label": "Tool Wear",        "probability_pct": 72},
-                    {"cause_label": "Motor Degradation", "probability_pct": 19},
-                    {"cause_label": "Thermal Drift",    "probability_pct": 9},
+            s["status"] = status
+            s["cycle_time"] = live_ct
+            s["vibration"] = live_vib
+            s["temperature"] = live_temp
+            s["torque"] = live_torque
+
+            # Residuals
+            s["ct_residual"] = round(live_ct - base_ct, 1)
+            s["vib_residual"] = round(live_vib - base_vib, 2)
+            s["temp_residual"] = round(live_temp - base_temp, 1)
+
+            if status == "anomaly":
+                s["confidence_score"] = round(88.0 + random.uniform(-1.0, 1.0), 1)
+                if is_wear_critical:
+                    s["root_causes"] = [
+                        {"cause_label": "Tool Wear", "probability_pct": 74.0},
+                        {"cause_label": "Spindle Degradation", "probability_pct": 18.0},
+                        {"cause_label": "Thermal Drift", "probability_pct": 8.0},
+                    ]
+                else:
+                    s["root_causes"] = [
+                        {"cause_label": "Thermal Drift", "probability_pct": 82.0},
+                        {"cause_label": "Oven Curing Imbalance", "probability_pct": 12.0},
+                        {"cause_label": "Sensor Calibration", "probability_pct": 6.0},
+                    ]
+                anomalous_stations.append(s)
+            elif status == "warning":
+                s["confidence_score"] = 65.0
+                s["root_causes"] = [
+                    {"cause_label": "Pneumatic Pressure Drop", "probability_pct": 80.0},
+                    {"cause_label": "Transit Delay", "probability_pct": 20.0},
                 ]
             else:
-                anom = conn.execute(
-                    "SELECT id, status, confidence_score FROM anomalies "
-                    "WHERE station_id = ? AND status IN ('open', 'inspecting') "
-                    "ORDER BY id DESC LIMIT 1",
-                    (s["id"],),
-                ).fetchone()
-                if anom:
-                    s["status"]          = "anomaly"
-                    s["confidence_score"] = anom["confidence_score"]
-                    rc_rows = conn.execute(
-                        "SELECT cause_label, probability_pct FROM root_causes "
-                        "WHERE anomaly_id = ?",
-                        (anom["id"],),
-                    ).fetchall()
-                    s["root_causes"] = [dict(r) for r in rc_rows]
-                else:
-                    s["status"]          = "normal"
-                    s["confidence_score"] = None
-                    s["root_causes"]     = None
+                s["confidence_score"] = None
+                s["root_causes"] = None
 
             stations.append(s)
 
-        # ── 2. Anomalies ──────────────────────────────────────────────────────
-        anomalies = []
-        for row in conn.execute(
-            "SELECT * FROM anomalies WHERE status IN ('open', 'inspecting') ORDER BY id DESC"
-        ):
-            a = dict(row)
-            s_row = conn.execute(
-                "SELECT * FROM stations WHERE id = ?", (a["station_id"],)
-            ).fetchone()
-            a["station"] = dict(s_row) if s_row else None
-            rc_rows = conn.execute(
-                "SELECT cause_label, probability_pct FROM root_causes WHERE anomaly_id = ?",
-                (a["id"],),
-            ).fetchall()
-            a["root_causes"] = [dict(r) for r in rc_rows]
-            br_rows = conn.execute(
-                "SELECT vehicle_id FROM blast_radius WHERE anomaly_id = ?", (a["id"],)
-            ).fetchall()
-            a["blast_radius"] = [r["vehicle_id"] for r in br_rows]
-            anomalies.append(a)
+        # ── 2. Correlated Multi-Station Blast Radius ──────────────────────────
+        critical_vids: Set[str] = set()
+        critical_vid_to_station: Dict[str, str] = {}
+        warning_vids: Set[str] = set()
+        warning_vid_to_station: Dict[str, str] = {}
 
-        # Inject a synthetic anomaly object for Station 14 if forced-active but
-        # the pipeline hasn't written one yet (warm-up ticks)
-        if s14_active and s14_intensity > 0 and not any(
-            a.get("station_id") == ANOMALY_STATION for a in anomalies
-        ):
-            s14_row = conn.execute(
-                "SELECT * FROM stations WHERE id = ?", (ANOMALY_STATION,)
+        anomalies_list = []
+        for ast in anomalous_stations:
+            seq = ast["sequence_no"]
+            si = seq - 1
+
+            # Vehicle inside station X is CRITICAL (Red)
+            vi_center = self.tick_index - si
+            v_center = self._get_vehicle(vi_center)["vehicle_id"]
+            critical_vids.add(v_center)
+            critical_vid_to_station[v_center] = ast["name"]
+
+            blast_radius_vehicles = [v_center]
+
+            # 3 chassis immediately downstream (seq + 1, seq + 2, seq + 3)
+            for k in [1, 2, 3]:
+                if seq + k <= 30:
+                    vi_down = self.tick_index - (seq + k - 1)
+                    v_down = self._get_vehicle(vi_down)["vehicle_id"]
+                    if v_down not in critical_vids:
+                        warning_vids.add(v_down)
+                        warning_vid_to_station[v_down] = ast["name"]
+                    blast_radius_vehicles.append(v_down)
+
+            # 3 chassis immediately upstream (seq - 1, seq - 2, seq - 3)
+            for k in [1, 2, 3]:
+                if seq - k >= 1:
+                    vi_up = self.tick_index - (seq - k - 1)
+                    v_up = self._get_vehicle(vi_up)["vehicle_id"]
+                    if v_up not in critical_vids:
+                        warning_vids.add(v_up)
+                        warning_vid_to_station[v_up] = ast["name"]
+                    blast_radius_vehicles.append(v_up)
+
+            # Update blast radius in SQLite
+            conn.execute(
+                "INSERT OR IGNORE INTO anomalies "
+                "(station_id, resource_id, detected_at, window_start, status, recommended_action) "
+                "VALUES (?, ?, datetime('now'), datetime('now'), 'open', 'Emergency E-Stop')",
+                (ast["id"], ast.get("resource_id", f"R{seq:02d}")),
+            )
+            anom_row = conn.execute(
+                "SELECT id FROM anomalies WHERE station_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+                (ast["id"],),
             ).fetchone()
-            anomalies.append({
-                "id": -1,
-                "station_id": ANOMALY_STATION,
-                "station": dict(s14_row) if s14_row else {},
-                "residual_cycle_time": round(DRIFT_CYCLE_TIME * s14_intensity, 1),
-                "residual_vibration":  round(DRIFT_VIBRATION  * s14_intensity, 2),
-                "residual_temperature": round(DRIFT_TEMPERATURE * s14_intensity, 1),
-                "confidence_score": round(78 + s14_intensity * 9, 1),
+            anom_id = anom_row["id"] if anom_row else (seq * 100)
+
+            # Persist blast radius rows
+            conn.execute("DELETE FROM blast_radius WHERE anomaly_id = ?", (anom_id,))
+            for vid in blast_radius_vehicles:
+                conn.execute(
+                    "INSERT INTO blast_radius (anomaly_id, vehicle_id) VALUES (?, ?)",
+                    (anom_id, vid),
+                )
+            conn.commit()
+
+            anomalies_list.append({
+                "id": anom_id,
+                "station_id": ast["id"],
+                "station": {
+                    "id": ast["id"],
+                    "name": ast["name"],
+                    "sequence_no": seq,
+                    "has_sensors": bool(ast.get("has_sensors", 1)),
+                    "resource_id": ast.get("resource_id", f"R{seq:02d}"),
+                    "status": "anomaly",
+                    "baseline": ast["baseline"],
+                },
+                "residual_cycle_time": ast["ct_residual"],
+                "residual_vibration": ast["vib_residual"],
+                "residual_temperature": ast["temp_residual"],
+                "confidence_score": ast["confidence_score"] or 88.0,
                 "status": "open",
-                "recommended_action": "inspect_recalibrate",
-                "root_causes": [
-                    {"cause_label": "Tool Wear",         "probability_pct": 72},
-                    {"cause_label": "Motor Degradation", "probability_pct": 19},
-                    {"cause_label": "Thermal Drift",     "probability_pct":  9},
-                ],
-                "blast_radius": [CRITICAL_VID] + list(WARNING_VIDS),
+                "recommended_action": "Emergency E-Stop",
+                "root_causes": ast["root_causes"],
+                "blast_radius": blast_radius_vehicles,
                 "what_if": [
-                    {"scenario_label": "continue",           "projected_throughput_impact": 60,  "projected_defect_containment": 10,  "is_recommended": 0},
-                    {"scenario_label": "slow_station",       "projected_throughput_impact": 52,  "projected_defect_containment": 45,  "is_recommended": 0},
-                    {"scenario_label": "inspect_recalibrate","projected_throughput_impact": 39,  "projected_defect_containment": 100, "is_recommended": 1},
+                    {
+                        "scenario_label": "Reroute",
+                        "projected_throughput_impact": -6.0,
+                        "projected_defect_containment": 70.0,
+                        "is_recommended": False,
+                    },
+                    {
+                        "scenario_label": "Slow Line Speed",
+                        "projected_throughput_impact": -12.0,
+                        "projected_defect_containment": 85.0,
+                        "is_recommended": False,
+                    },
+                    {
+                        "scenario_label": "Emergency E-Stop",
+                        "projected_throughput_impact": -28.0,
+                        "projected_defect_containment": 100.0,
+                        "is_recommended": True,
+                    },
                 ],
             })
 
-        # ── 3. Vehicles ───────────────────────────────────────────────────────
-        vehicles = []
-        rows = conn.execute("""
-            SELECT v.id, v.model, p.station_id
-            FROM vehicles v
-            JOIN process_events p ON v.id = p.vehicle_id
-            WHERE p.exited_at = (
-                SELECT MAX(exited_at) FROM process_events WHERE vehicle_id = v.id
-            )
-            ORDER BY p.exited_at DESC
-            LIMIT 50
-        """).fetchall()
+        # ── 3. Active Conveyor Vehicles (Exactly 30 on Physical Line) ─────────
+        active_vehicles = []
+        for seq in range(1, 31):
+            si = seq - 1
+            vi = self.tick_index - si
+            v_obj = self._get_vehicle(vi)
+            vid = v_obj["vehicle_id"]
+            station_id = f"STATION_{seq:02d}"
 
-        all_blast_vehicles = {vid for a in anomalies for vid in a.get("blast_radius", [])}
-
-        for r in rows:
-            v = dict(r)
-            v["current_station"] = v["station_id"]
-
-            if v["id"] == CRITICAL_VID:
-                v["status"]            = "critical"
-                v["is_in_blast_radius"] = True
-                v["defect_risk_pct"]   = 94
-                v["defect_label"]      = "Structural Torque Out-of-Spec"
-            elif v["id"] in WARNING_VIDS:
-                v["status"]            = "warning"
-                v["is_in_blast_radius"] = True
-                v["defect_risk_pct"]   = 68
-                v["defect_label"]      = "Blast Radius — Containment Required"
+            if vid in critical_vids:
+                status = "critical"
+                st_name = critical_vid_to_station.get(vid, station_id)
+                defect_label = f"CRITICAL ({st_name} Breach - 94% Defect Risk)"
+                defect_risk_pct = 94
+                is_blast = True
+            elif vid in warning_vids:
+                status = "warning"
+                defect_label = "WARNING (At Risk - Blast Radius)"
+                defect_risk_pct = 68
+                is_blast = True
+            elif seq in self.micro_stoppages:
+                status = "warning"
+                defect_label = "WARNING (Pneumatic Delay At Station)"
+                defect_risk_pct = 45
+                is_blast = True
             else:
-                v["status"]            = "normal"
-                v["is_in_blast_radius"] = v["id"] in all_blast_vehicles
-                v["defect_risk_pct"]   = 0
-                v["defect_label"]      = "Passing"
+                status = "normal"
+                defect_label = "PASSING (Normal 3-Sigma)"
+                defect_risk_pct = 0
+                is_blast = False
 
-            vehicles.append(v)
+            active_vehicles.append({
+                "id": vid,
+                "model": v_obj.get("model", "Model-X"),
+                "current_station": station_id,
+                "station_id": station_id,
+                "sequence_no": seq,
+                "status": status,
+                "is_in_blast_radius": is_blast,
+                "defect_risk_pct": defect_risk_pct,
+                "defect_label": defect_label,
+                "completed": False,
+            })
 
-        # ── 4. KPIs ───────────────────────────────────────────────────────────
-        cycle_times = [s["cycle_time"] for s in stations if s["cycle_time"] > 0]
-        max_ct      = max(cycle_times) if cycle_times else 60.0
-        active_vel  = round(3600.0 / max_ct + random.uniform(-0.4, 0.4), 1)
+        # ── 4. Completed Historical Vehicles Archive (Exited S30) ────────────
+        completed_vehicles = []
+        max_completed_vi = self.tick_index - 30
+        for vi in range(max(0, max_completed_vi - 100), max_completed_vi + 1):
+            v_obj = self._get_vehicle(vi)
+            vid = v_obj["vehicle_id"]
+            has_defect = any(e.get("is_anomaly", 0) > 0 for e in v_obj.get("events", []))
 
-        # Defect risk: 28–42% during active anomaly, 2–6% nominal
-        if s14_active and s14_intensity > 0.05:
-            defect_risk = round(28.0 + 14.0 * s14_intensity + random.uniform(-1.5, 1.5), 1)
-        elif anomalies:
-            defect_risk = round(15.0 * len(anomalies) + random.uniform(-1, 1), 1)
-        else:
-            defect_risk = round(2.0 + random.uniform(0, 4), 1)
+            if vid in critical_vids:
+                status = "critical"
+                defect_label = "CRITICAL (Historical Defect Flagged)"
+                defect_risk_pct = 94
+                is_blast = True
+            elif vid in warning_vids or has_defect:
+                status = "warning"
+                defect_label = "WARNING (Historical Blast Radius)"
+                defect_risk_pct = 65
+                is_blast = True
+            else:
+                status = "normal"
+                defect_label = "PASSING (Normal 3-Sigma)"
+                defect_risk_pct = 0
+                is_blast = False
+
+            completed_vehicles.append({
+                "id": vid,
+                "model": v_obj.get("model", "Model-X"),
+                "current_station": "STATION_30 (Completed)",
+                "station_id": "STATION_30",
+                "sequence_no": 30,
+                "status": status,
+                "is_in_blast_radius": is_blast,
+                "defect_risk_pct": defect_risk_pct,
+                "defect_label": defect_label,
+                "completed": True,
+            })
+
+        # ── 5. KPIs ───────────────────────────────────────────────────────────
+        max_ct = max([st["cycle_time"] for st in stations] or [65.0])
+        active_vel = round(3600.0 / max(50.0, max_ct) + random.uniform(-0.3, 0.3), 1)
+
+        defect_count = len(critical_vids) + len(warning_vids)
+        defect_risk = round(min(98.0, (defect_count / 30.0) * 100.0), 1) if defect_count > 0 else 0.0
 
         blind_stations = conn.execute(
             "SELECT COUNT(*) as c FROM stations WHERE has_sensors=0"
         ).fetchone()["c"]
 
-        base_buffer = 14 + max(0, (60.0 - active_vel) / 5.0)
-        buffer      = max(14, min(18, int(base_buffer + random.uniform(-1, 1))))
-
         kpis = {
-            "active_line_velocity":    active_vel,
-            "fleet_defect_risk_pct":   round(max(0.0, defect_risk), 1),
+            "active_line_velocity": active_vel,
+            "fleet_defect_risk_pct": defect_risk,
             "blind_stations_inferred": blind_stations,
-            "total_blind_stations":    blind_stations,
-            "total_units_in_buffer":   buffer,
+            "total_blind_stations": blind_stations,
+            "total_units_in_buffer": 14,
         }
 
         GLOBAL_STATE["stations"] = stations
-        GLOBAL_STATE["anomalies"] = anomalies
-        GLOBAL_STATE["vehicles"]  = vehicles
-        GLOBAL_STATE["kpis"]      = kpis
+        GLOBAL_STATE["anomalies"] = anomalies_list
+        GLOBAL_STATE["vehicles"] = active_vehicles
+        GLOBAL_STATE["completed_vehicles"] = completed_vehicles
+        GLOBAL_STATE["kpis"] = kpis
 
 
 streamer = SimulationStreamer()
-

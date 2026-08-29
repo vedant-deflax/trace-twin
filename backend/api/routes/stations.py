@@ -12,6 +12,21 @@ router = APIRouter(prefix="/stations", tags=["stations"])
 @router.get("", response_model=list[StationResponse])
 async def list_stations():
     """List all stations with baseline and live status."""
+    from backend.simulator.streamer import GLOBAL_STATE
+    if GLOBAL_STATE.get("stations"):
+        return [
+            StationResponse(
+                id=s["id"],
+                name=s["name"],
+                sequence_no=s["sequence_no"],
+                has_sensors=s.get("has_sensors", True),
+                resource_id=s.get("resource_id"),
+                baseline=s.get("baseline"),
+                status=s.get("status", "normal"),
+            )
+            for s in GLOBAL_STATE["stations"]
+        ]
+
     conn = await get_async_connection()
     try:
         rows = await conn.execute_fetchall(
@@ -104,6 +119,7 @@ async def get_station_events(
                 cycle_time_sec=r["cycle_time_sec"],
                 vibration_mm_s=r["vibration_mm_s"],
                 temperature_c=r["temperature_c"],
+                torque_nm=r["torque_nm"],
                 source_system=r["source_system"],
                 is_inferred=bool(r["is_inferred"]),
             )

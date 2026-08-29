@@ -30,7 +30,7 @@ STATIONS = [
     ("STATION_11", "Paint - Pre-Treatment P11",       11, 1, "R11"),
     ("STATION_12", "Paint - E-Coat P12",              12, 1, "R12"),
     ("STATION_13", "Paint - Primer P13",              13, 1, "R13"),
-    ("STATION_14", "Paint - Robot R14",               14, 1, "R14"),   # ANOMALY TARGET
+    ("STATION_14", "Framing - Torque & Weld R14",     14, 1, "R14"),   # ANOMALY TARGET
     ("STATION_15", "Paint - Base Coat P15",           15, 1, "R15"),
     ("STATION_16", "Paint - Clear Coat P16",          16, 0, "R16"),   # SENSORLESS
     ("STATION_17", "Paint - Curing Oven P17",         17, 1, "R17"),
@@ -78,7 +78,7 @@ BASELINES = {
     "STATION_11": (110, 1.3, 58),
     "STATION_12": (105, 1.0, 62),
     "STATION_13": (100, 1.2, 55),
-    "STATION_14": (52,  2.8, 58),   # KEY BASELINE — anomaly target
+    "STATION_14": (75,  1.4, 38),   # KEY BASELINE — anomaly target (75s CT, 1.4mm/s Vib, 38°C Temp)
     "STATION_15": (108, 1.1, 60),
     "STATION_16": (115, 0.9, 65),   # sensorless
     "STATION_17": (120, 0.8, 70),
@@ -101,11 +101,27 @@ BASELINES = {
 
 def init_db() -> None:
     """Create a fresh database with schema + seed data."""
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-        print(f"  Removed existing DB at {DB_PATH}")
+    try:
+        if DB_PATH.exists():
+            conn = sqlite3.connect(str(DB_PATH), timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            tables = [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
+            for t in tables:
+                cursor.execute(f"DROP TABLE IF EXISTS {t}")
+            conn.commit()
+            conn.close()
+            print("  Cleared existing tables.")
+    except Exception as e:
+        print(f"  Note during table drop: {e}")
+        for p in [DB_PATH, Path(str(DB_PATH) + "-wal"), Path(str(DB_PATH) + "-shm")]:
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
@@ -132,12 +148,73 @@ def init_db() -> None:
             (sid, ct, vib, temp),
         )
 
+    # Re-seed SQLite database with realistic telemetry dataset (300 vehicles, 9000 events)
+    import pandas as pd
+    from datetime import datetime, timedelta
+    from backend.simulator.dataset_generator import (
+        generate_production_telemetry,
+        save_telemetry_csv,
+        CSV_PATH,
+        SENSORLESS_STATIONS,
+        BASE_TORQUE_NM,
+    )
+
+    if CSV_PATH.exists():
+        df = pd.read_csv(str(CSV_PATH))
+    else:
+        df = generate_production_telemetry(num_vehicles=300, random_seed=42)
+        save_telemetry_csv(df)
+
+    vehicle_entries = []
+    for vin, group in df.groupby("vehicle_id", sort=False):
+        first_ts = group["timestamp"].iloc[0]
+        vehicle_entries.append((vin, "Model-X", first_ts))
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO vehicles (id, model, line_entry_ts) VALUES (?, ?, ?)",
+        vehicle_entries,
+    )
+
+    event_entries = []
+    for _, row in df.iterrows():
+        seq = int(row["station_seq"])
+        sid = f"STATION_{seq:02d}"
+        res_id = f"R{seq:02d}"
+        is_sensorless = seq in SENSORLESS_STATIONS
+        ts = datetime.fromisoformat(row["timestamp"])
+        cycle_time = float(row["cycle_time"])
+        exited = ts + timedelta(seconds=cycle_time)
+        torque = float(row["joint_torque"]) if pd.notna(row["joint_torque"]) and row["joint_torque"] > 0 else BASE_TORQUE_NM
+
+        event_entries.append((
+            row["vehicle_id"],
+            sid,
+            res_id,
+            ts.isoformat(),
+            exited.isoformat(),
+            cycle_time,
+            float(row["tool_vibration"]),
+            float(row["process_temperature"]),
+            torque,
+            "INFERRED" if is_sensorless else "MES",
+            1 if is_sensorless else 0,
+        ))
+
+    conn.executemany(
+        "INSERT INTO process_events "
+        "(vehicle_id, station_id, resource_id, entered_at, exited_at, "
+        " cycle_time_sec, vibration_mm_s, temperature_c, torque_nm, source_system, is_inferred) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        event_entries,
+    )
+
     conn.commit()
     conn.close()
 
     sensorless = [s[0] for s in STATIONS if s[3] == 0]
     print(f"  Database initialized at {DB_PATH}")
     print(f"  Seeded {len(STATIONS)} stations, {len(RESOURCE_TYPES)} resources, {len(BASELINES)} baselines.")
+    print(f"  Reseeded {len(vehicle_entries)} vehicles and {len(event_entries)} process events from realistic dataset.")
     print(f"  Sensorless stations: {', '.join(sensorless)}")
 
 

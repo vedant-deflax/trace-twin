@@ -414,11 +414,17 @@ function WhatIfPanel({
     continue: { border: "border-red-500/40", bg: "bg-red-500/5", text: "text-red-400" },
     slow_station: { border: "border-amber-500/40", bg: "bg-amber-500/5", text: "text-amber-400" },
     inspect_recalibrate: { border: "border-green-500/40", bg: "bg-green-500/5", text: "text-green-400" },
+    Reroute: { border: "border-gray-700", bg: "bg-gray-900/50", text: "text-gray-300" },
+    "Slow Line Speed": { border: "border-amber-500/40", bg: "bg-amber-500/5", text: "text-amber-400" },
+    "Emergency E-Stop": { border: "border-purple-500/50", bg: "bg-purple-900/10", text: "text-purple-300" },
   };
   const labelMap: Record<string, string> = {
     continue: "Continue Production",
     slow_station: "Slow Station",
     inspect_recalibrate: "Inspect & Recalibrate",
+    Reroute: "Scenario A: Reroute",
+    "Slow Line Speed": "Scenario B: Slow Line Speed",
+    "Emergency E-Stop": "Scenario C: Emergency E-Stop",
   };
 
   async function handleApprove() {

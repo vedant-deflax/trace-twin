@@ -7,7 +7,7 @@ Run with:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import stations, vehicles, anomalies, simulate, kpis, stream
+from backend.api.routes import stations, vehicles, anomalies, simulate, kpis, stream, actions
 from backend.simulator.streamer import streamer
 import asyncio
 
@@ -37,6 +37,7 @@ app.include_router(anomalies.router, prefix="/api/v1")
 app.include_router(simulate.router, prefix="/api/v1")
 app.include_router(kpis.router, prefix="/api/v1")
 app.include_router(stream.router, prefix="/api/v1")
+app.include_router(actions.router, prefix="/api/v1")
 
 
 

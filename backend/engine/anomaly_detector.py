@@ -16,7 +16,7 @@ VIBRATION_THRESHOLD   = 0.8    # mm/s     (well above 0.12 σ noise)
 TEMPERATURE_THRESHOLD = 4.0    # °C       (well above 0.8 σ noise)
 
 # Consecutive normal events required before auto-resolving an anomaly
-RESOLVE_STREAK = 3
+RESOLVE_STREAK = 2
 
 
 def detect_anomalies(conn: sqlite3.Connection) -> list[dict]:
@@ -157,3 +157,13 @@ def detect_anomalies(conn: sqlite3.Connection) -> list[dict]:
 
     conn.commit()
     return results
+
+
+def resolve_station_anomaly(conn: sqlite3.Connection, station_id: str) -> None:
+    """Explicitly resolve any open anomaly for a station (called on intervention)."""
+    conn.execute(
+        "UPDATE anomalies SET status = 'resolved', window_end = datetime('now') "
+        "WHERE station_id = ? AND status = 'open'",
+        (station_id,),
+    )
+    conn.commit()

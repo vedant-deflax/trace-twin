@@ -34,6 +34,7 @@ export interface ProcessEvent {
   torque_nm: number | null;
   source_system: string | null;
   is_inferred: boolean;
+  sequence_no?: number;
 }
 
 export interface RootCause {
@@ -50,13 +51,18 @@ export interface WhatIfScenario {
 
 export interface AnomalyListItem {
   id: number;
-  station: { id: string; name: string };
+  station: { id: string; name: string; sequence_no?: number; has_sensors?: boolean; resource_id?: string; baseline?: any; status?: string };
   detected_at: string;
   status: string;
   confidence_score: number | null;
   recommended_action: string | null;
   root_causes?: RootCause[];
   blast_radius?: string[];
+  residual_cycle_time?: number | null;
+  residual_vibration?: number | null;
+  residual_temperature?: number | null;
+  residuals?: { cycle_time_sec?: number; vibration_mm_s?: number; temperature_c?: number };
+  what_if?: WhatIfScenario[];
 }
 
 export interface AnomalyDetail {
@@ -96,6 +102,11 @@ export interface VehicleListItem {
   current_station: string | null;
   status: string;
   is_in_blast_radius: boolean;
+  sequence_no?: number;
+  completed?: boolean;
+  station_count?: number;
+  defect_label?: string;
+  defect_risk_pct?: number;
 }
 
 export interface FactoryKPIs {
@@ -104,4 +115,34 @@ export interface FactoryKPIs {
   blind_stations_inferred: number;
   total_blind_stations: number;
   total_units_in_buffer: number;
+}
+
+export interface DiagnosticData {
+  vehicle_id: string;
+  station_seq: number;
+  station_id: string;
+  station_name: string;
+  status: "CRITICAL" | "WARNING" | "HEALTHY" | string;
+  severity_color: "red" | "amber" | "green" | string;
+  confidence_score: number;
+  key_contributors: string[];
+  retrieved_context: string[];
+  primary_root_cause: string;
+  causal_mechanism: string;
+  containment_action: string;
+  telemetry_summary: {
+    cycle_time_sec: number;
+    vibration_mm_s: number;
+    temperature_c: number;
+    torque_nm: number;
+    delta_torque: number;
+    delta_vibration: number;
+    delta_temperature: number;
+    delta_cycle_time: number;
+    z_torque: number;
+    z_vibration: number;
+    z_temperature: number;
+    z_cycle_time: number;
+    is_inferred: boolean;
+  };
 }

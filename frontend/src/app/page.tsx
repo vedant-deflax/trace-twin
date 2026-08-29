@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
 import { useStream } from "@/context/StreamContext";
 import { MemoLineOverview } from "@/components/DashboardComponents";
 import { AlertTriangle, Activity, CheckCircle, Zap, ShieldAlert, Thermometer, ShieldCheck, Clock } from "lucide-react";
@@ -9,6 +10,9 @@ import { fetchAPI, AnomalyDetail, ProcessEvent } from "@/lib/api";
 export default function CommandCenterPage() {
   const { stations, kpis, vehicles, anomalies, loading, error, forceRefresh } = useStream();
   const [selectedStationId, setSelectedStationId] = useState<string>("STATION_14");
+  const [selectedScenario, setSelectedScenario] = useState<string>("Emergency E-Stop");
+  const [actionExecuting, setActionExecuting] = useState<boolean>(false);
+  const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -57,8 +61,13 @@ export default function CommandCenterPage() {
   const vibDiff = baseline ? (vibration - baseline.expected_vibration_mm_s) : 0;
   const tempDiff = baseline ? (temp - baseline.expected_temperature_c) : 0;
 
-  // Find anomaly corresponding to the selected station
-  const anomaly = anomalies.find(a => a.station?.id === selectedStation?.id);
+  // Active anomaly resolution: check if selected station has an open anomaly,
+  // or fall back to any active open anomaly on the line
+  const activeStationAnomaly = anomalies.find(
+    a => a.status === 'open' && (a.station?.id === selectedStation?.id || (a as any).station_id === selectedStation?.id)
+  );
+  const openLineAnomaly = anomalies.find(a => a.status === 'open');
+  const anomaly = activeStationAnomaly || openLineAnomaly || null;
   const blastRadiusVehicles = anomaly?.blast_radius || [];
 
   return (
@@ -216,42 +225,73 @@ export default function CommandCenterPage() {
               <ShieldAlert className="w-5 h-5 text-amber-500" /> Active Vehicle Digital Thread
             </h2>
 
-            {/* Carousel */}
+            {/* Carousel (Active in-flight vehicles on conveyor, max 30) */}
             <div className="flex gap-3 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
-              {vehicles.map(v => {
-                const isCritical = (v as any).status === 'critical';
-                const isBlast = (v as any).status === 'warning' || blastRadiusVehicles.includes(v.id) || (v as any).is_in_blast_radius;
-                
-                return (
-                  <div key={v.id} className={`shrink-0 w-32 rounded-lg border p-3 flex flex-col items-center justify-center transition-all ${
-                    isCritical 
-                      ? "border-red-500 bg-red-500/10 shadow-[0_0_15px_rgba(239,68,68,0.3)] animate-pulse" 
-                      : isBlast 
-                      ? "border-amber-500/50 bg-amber-500/5" 
-                      : "border-gray-800 bg-gray-900"
-                  }`}>
-                    <span className={`text-[10px] font-bold mb-1 ${isCritical ? 'text-red-400' : isBlast ? 'text-amber-400' : 'text-green-500'}`}>
-                      {isCritical ? "CRITICAL ALERT" : isBlast ? "WARNING" : "PASSING"}
-                    </span>
-                    <span className="text-sm font-mono font-bold text-white">{v.id.replace("VEH_", "#")}</span>
-                    <span className="text-[9px] text-gray-500 mt-1">{v.current_station}</span>
-                  </div>
-                )
-              })}
+              {vehicles
+                .filter(v => !v.completed)
+                .slice(0, 30)
+                .map(v => {
+                  const isCritical = (v as any).status === 'critical';
+                  const isBlast = (v as any).status === 'warning' || (v as any).is_in_blast_radius;
+
+                  const badgeText = isCritical
+                    ? (v as any).defect_label || "CRITICAL (Out-of-Spec - High Risk)"
+                    : isBlast
+                    ? (v as any).defect_label || "WARNING (At Risk - Blast Radius)"
+                    : "PASSING (Normal 3-Sigma)";
+
+                  return (
+                    <Link
+                      key={v.id}
+                      href={`/vehicle-deep-dive?vehicleId=${v.id}`}
+                      className="shrink-0 group"
+                    >
+                      <div className={`w-48 rounded-lg border p-3 flex flex-col items-center justify-center transition-all group-hover:scale-105 group-hover:border-cyan-400 cursor-pointer ${
+                        isCritical 
+                          ? "border-red-500 bg-red-500/10 shadow-[0_0_15px_rgba(239,68,68,0.3)] animate-pulse" 
+                          : isBlast 
+                          ? "border-amber-500/50 bg-amber-500/10" 
+                          : "border-gray-800 bg-gray-900/80"
+                      }`}>
+                        <span className={`text-[9px] font-bold mb-1.5 text-center leading-tight px-1.5 py-0.5 rounded ${
+                          isCritical
+                            ? "bg-red-500/20 text-red-400 border border-red-500/40"
+                            : isBlast
+                            ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
+                            : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                        }`}>
+                          {badgeText}
+                        </span>
+                        <span className="text-sm font-mono font-bold text-white mt-1">{v.id.replace("VEH_", "#")}</span>
+                        <span className="text-[10px] text-gray-400 mt-1 font-mono">{v.current_station || "In-Flight"}</span>
+                      </div>
+                    </Link>
+                  );
+                })}
             </div>
 
             {/* Exposed Blast Radius List */}
             {blastRadiusVehicles.length > 0 && (
-              <div className="mt-2 bg-amber-500/5 border border-amber-500/20 rounded-lg p-4">
+              <div className="mt-2 bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 transition-all">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs font-bold text-amber-500 uppercase tracking-widest">Exposed Blast Radius Containment ({blastRadiusVehicles.length} Units)</h3>
+                  <h3 className="text-xs font-bold text-amber-500 uppercase tracking-widest flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4" />
+                    Exposed Blast Radius Containment ({blastRadiusVehicles.length} Units)
+                  </h3>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    Target: {anomaly?.station?.name || selectedStation?.name}
+                  </span>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {blastRadiusVehicles.map(vid => (
-                    <div key={vid} className="px-3 py-1.5 bg-gray-900 border border-amber-500/30 rounded flex items-center gap-2">
+                    <Link
+                      key={vid}
+                      href={`/vehicle-deep-dive?vehicleId=${vid}`}
+                      className="px-3 py-1.5 bg-gray-900 border border-amber-500/30 rounded flex items-center gap-2 hover:border-amber-400 hover:scale-105 transition-all"
+                    >
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
                       <span className="text-xs font-mono text-amber-100">{vid.replace("VEH_", "#")}</span>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               </div>
@@ -260,87 +300,158 @@ export default function CommandCenterPage() {
 
           {/* Bottom Panel: What-If Simulator */}
           <div className="bg-[#0a0f1a] border border-gray-800 rounded-xl p-5 shadow-lg flex-1 flex flex-col">
-            <h2 className="text-lg font-bold text-white flex items-center gap-2 mb-4">
-              <Activity className="w-5 h-5 text-purple-400" /> What-If Decision Simulator
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Activity className="w-5 h-5 text-purple-400" /> What-If Decision Simulator
+              </h2>
+              {anomaly && (
+                <span className="text-xs font-mono text-cyan-400 bg-cyan-950/40 px-2.5 py-1 rounded border border-cyan-800/40">
+                  Target Station: {anomaly.station?.id || selectedStationId}
+                </span>
+              )}
+            </div>
+
+            {actionSuccessMessage && (
+              <div className="mb-4 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 shrink-0" /> {actionSuccessMessage}
+              </div>
+            )}
+
             {anomaly ? (
               <>
                 <div className="grid grid-cols-3 gap-4 flex-1">
-                  {/* Scenario A */}
-                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col">
-                    <h3 className="text-sm font-bold text-white mb-1">Scenario A: Continue</h3>
-                    <p className="text-[10px] text-gray-500 mb-4 h-8">Projects downstream defect escape to end-of-line.</p>
+                  {/* Scenario A: Reroute */}
+                  <div
+                    onClick={() => setSelectedScenario("Reroute")}
+                    className={`rounded-lg p-4 flex flex-col cursor-pointer transition-all ${
+                      selectedScenario === "Reroute"
+                        ? "bg-cyan-950/30 border-2 border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.25)]"
+                        : "bg-gray-900 border border-gray-800 hover:border-gray-700"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <h3 className="text-sm font-bold text-white">Scenario A: Reroute</h3>
+                      {selectedScenario === "Reroute" && (
+                        <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-gray-400 mb-4 h-8 leading-snug">Projects downstream buffer bypass to alternate cell.</p>
                     <div className="space-y-3 mt-auto">
                       <div>
                         <p className="text-[9px] text-gray-500 uppercase">Line Rate Impact</p>
-                        <p className="text-base font-mono text-white">60 <span className="text-xs text-gray-400">veh/hr (±0)</span></p>
+                        <p className="text-base font-mono text-white">54 <span className="text-xs text-gray-400">veh/hr (-6)</span></p>
                       </div>
                       <div>
                         <p className="text-[9px] text-gray-500 uppercase mb-1">Defect Containment</p>
-                        <div className="w-full h-1.5 bg-gray-800 rounded-full"><div className="h-full bg-red-500 w-[10%]"></div></div>
-                        <p className="text-xs text-red-400 mt-1">10% (High Risk)</p>
+                        <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden"><div className="h-full bg-amber-500 w-[70%]"></div></div>
+                        <p className="text-xs text-amber-400 mt-1">70% (Moderate Containment)</p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Scenario B */}
-                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col">
-                    <h3 className="text-sm font-bold text-white mb-1">Scenario B: Slow Station</h3>
-                    <p className="text-[10px] text-gray-500 mb-4 h-8">Projects buffer delay vs throughput penalty.</p>
+                  {/* Scenario B: Slow Line Speed */}
+                  <div
+                    onClick={() => setSelectedScenario("Slow Line Speed")}
+                    className={`rounded-lg p-4 flex flex-col cursor-pointer transition-all ${
+                      selectedScenario === "Slow Line Speed"
+                        ? "bg-amber-950/30 border-2 border-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.25)]"
+                        : "bg-gray-900 border border-gray-800 hover:border-gray-700"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <h3 className="text-sm font-bold text-white">Scenario B: Slow Line Speed</h3>
+                      {selectedScenario === "Slow Line Speed" && (
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-gray-400 mb-4 h-8 leading-snug">Projects line deceleration to reduce tooling stress and chatter.</p>
                     <div className="space-y-3 mt-auto">
                       <div>
                         <p className="text-[9px] text-gray-500 uppercase">Line Rate Impact</p>
-                        <p className="text-base font-mono text-amber-400">52 <span className="text-xs text-gray-400">veh/hr (-8)</span></p>
+                        <p className="text-base font-mono text-amber-400">48 <span className="text-xs text-gray-400">veh/hr (-12)</span></p>
                       </div>
                       <div>
                         <p className="text-[9px] text-gray-500 uppercase mb-1">Defect Containment</p>
-                        <div className="w-full h-1.5 bg-gray-800 rounded-full"><div className="h-full bg-amber-500 w-[45%]"></div></div>
-                        <p className="text-xs text-amber-400 mt-1">45% (Moderate Risk)</p>
+                        <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden"><div className="h-full bg-amber-400 w-[85%]"></div></div>
+                        <p className="text-xs text-amber-400 mt-1">85% (High Containment)</p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Scenario C */}
-                  <div className="bg-purple-900/10 border-2 border-purple-500/50 rounded-lg p-4 flex flex-col relative overflow-hidden">
+                  {/* Scenario C: Emergency E-Stop (RECOMMENDED) */}
+                  <div
+                    onClick={() => setSelectedScenario("Emergency E-Stop")}
+                    className={`rounded-lg p-4 flex flex-col relative overflow-hidden cursor-pointer transition-all ${
+                      selectedScenario === "Emergency E-Stop"
+                        ? "bg-purple-950/40 border-2 border-purple-400 shadow-[0_0_20px_rgba(168,85,247,0.35)]"
+                        : "bg-purple-900/10 border-2 border-purple-500/50 hover:border-purple-400/80"
+                    }`}
+                  >
                     <div className="absolute top-0 right-0 bg-purple-500 text-white text-[8px] font-bold px-2 py-0.5 rounded-bl">RECOMMENDED</div>
-                    <h3 className="text-sm font-bold text-white mb-1">Scenario C: Inspect & Recalibrate</h3>
-                    <p className="text-[10px] text-purple-300/70 mb-4 h-8">Contains defect. 9 vehicles affected.</p>
+                    <div className="flex items-center justify-between mb-1">
+                      <h3 className="text-sm font-bold text-white">Scenario C: Emergency E-Stop</h3>
+                      {selectedScenario === "Emergency E-Stop" && (
+                        <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping"></span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-purple-300/80 mb-4 h-8 leading-snug">Immediate line interlock & tool recalibration. Full containment.</p>
                     <div className="space-y-3 mt-auto">
                       <div>
                         <p className="text-[9px] text-purple-400/70 uppercase">Line Rate Impact</p>
-                        <p className="text-base font-mono text-purple-400">39 <span className="text-xs text-purple-400/50">veh/hr (-21)</span></p>
+                        <p className="text-base font-mono text-purple-400">32 <span className="text-xs text-purple-400/50">veh/hr (-28)</span></p>
                       </div>
                       <div>
                         <p className="text-[9px] text-purple-400/70 uppercase mb-1">Defect Containment</p>
-                        <div className="w-full h-1.5 bg-gray-900 rounded-full"><div className="h-full bg-green-500 w-[100%] shadow-[0_0_10px_rgba(34,197,94,0.5)]"></div></div>
-                        <p className="text-xs text-green-400 mt-1 font-bold">100% (Contained)</p>
+                        <div className="w-full h-1.5 bg-gray-900 rounded-full overflow-hidden"><div className="h-full bg-green-500 w-[100%] shadow-[0_0_10px_rgba(34,197,94,0.5)]"></div></div>
+                        <p className="text-xs text-green-400 mt-1 font-bold">100% (Fully Contained)</p>
                       </div>
                     </div>
                   </div>
                 </div>
 
                 <button 
+                  disabled={actionExecuting}
                   onClick={async () => {
+                    const targetStationId = anomaly.station?.id || selectedStationId;
+                    setActionExecuting(true);
+                    setActionSuccessMessage(null);
                     try {
-                      await fetchAPI(`/anomalies/${anomaly.id}/approve`, {
+                      await fetchAPI('/actions/execute', {
                         method: 'POST',
-                        body: JSON.stringify({ action: 'inspect recalibrate' })
+                        body: JSON.stringify({
+                          station_id: targetStationId,
+                          scenario_label: selectedScenario,
+                          anomaly_id: anomaly.id,
+                        })
                       });
+                      setActionSuccessMessage(`Intervention '${selectedScenario}' executed for ${targetStationId}. Telemetry reset to baseline (Δ=0).`);
+                      setTimeout(() => setActionSuccessMessage(null), 5000);
                       forceRefresh();
                     } catch (err) {
-                      console.error("Failed to approve intervention:", err);
-                      alert("Error approving intervention. Check console for details.");
+                      console.error("Failed to execute intervention:", err);
+                      alert("Error executing intervention. Check console for details.");
+                    } finally {
+                      setActionExecuting(false);
                     }
                   }}
-                  className="mt-6 w-full py-3 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-lg shadow-[0_0_15px_rgba(6,182,212,0.4)] transition-all flex justify-center items-center gap-2"
+                  className="mt-6 w-full py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-lg shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all flex justify-center items-center gap-2 disabled:opacity-50 cursor-pointer"
                 >
-                  <CheckCircle className="w-4 h-4" /> Approve Targeted Intervention
+                  {actionExecuting ? (
+                    <>
+                      <Activity className="w-4 h-4 animate-spin" /> Executing {selectedScenario}...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4" /> Execute & Resolve: {selectedScenario}
+                    </>
+                  )}
                 </button>
               </>
             ) : (
               <div className="flex flex-col items-center justify-center flex-1 text-gray-500 p-8 border border-dashed border-gray-800 rounded-xl">
-                <CheckCircle className="w-8 h-8 text-gray-700 mb-2" />
-                <p>Select an active anomaly on the pipeline to run What-If scenarios.</p>
+                <CheckCircle className="w-8 h-8 text-green-500/60 mb-2" />
+                <p className="text-sm text-gray-300 font-medium">All Stations Operating Within Nominal 3-Sigma Limits</p>
+                <p className="text-xs text-gray-500 mt-1">No active anomalies requiring what-if resolution.</p>
               </div>
             )}
           </div>
