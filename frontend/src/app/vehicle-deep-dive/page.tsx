@@ -411,6 +411,24 @@ function VehicleDeepDiveContent() {
     // Is this chassis carrying an uncontained defect from an upstream station?
     const isCarryingUpstreamDefect = Boolean(upstreamAnomaly && selectedSeq > upstreamAnomaly.seq);
 
+    // Dynamic Distance-Decay Causal Proportions for Propagated Risk
+    const upstreamDefectStationSeq = upstreamAnomaly?.seq || 14;
+    const stationDistance = Math.max(1, selectedSeq - upstreamDefectStationSeq);
+    const baseDefectRisk = (currentVehicle as any)?.defect_risk_pct 
+      ?? (currentVehicle as any)?.predicted_risk_pct 
+      ?? (currentVehicle?.status === "critical" ? 88.0 : 75.0);
+
+    const rawPersistence = Math.max(15.0, Math.exp(-0.12 * stationDistance) * (baseDefectRisk || 75.0));
+    const rawFitment = Math.min(60.0, 15.0 + stationDistance * 3.5);
+    const rawLocal = Math.max(5.0, maxZ * 12.0);
+
+    const totalCausal = rawPersistence + rawFitment + rawLocal;
+    const latentPercent = Number(((rawPersistence / totalCausal) * 100).toFixed(0));
+    const fitmentPercent = Number(((rawFitment / totalCausal) * 100).toFixed(0));
+    const residualPercent = 100 - latentPercent - fitmentPercent;
+
+    const propagatedRiskScore = Math.round(baseDefectRisk * Math.exp(-0.04 * stationDistance));
+
     // Status Badge and Color for Station X relative to car position & process bounds
     let statusBadge = "PASSING (Nominal 3-Sigma)";
     let badgeColor = "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40";
@@ -501,9 +519,9 @@ function VehicleDeepDiveContent() {
         ]
       : isCarryingUpstreamDefect
       ? [
-          `Upstream Persistence: 65%`,
-          `Fitment & Alignment Risk: 25%`,
-          `Local Station S${selectedSeq.toString().padStart(2, '0')} Residual: 10%`,
+          `Latent Defect Persistence: ${latentPercent}%`,
+          `Fitment & Alignment Risk: ${fitmentPercent}%`,
+          `Local Station S${selectedSeq.toString().padStart(2, '0')} Residual: ${residualPercent}%`,
           thermalBenchmarkBullet,
           powerBullet,
         ]
@@ -562,6 +580,12 @@ function VehicleDeepDiveContent() {
       isCriticalAtThisStation,
       isWithin3Sigma,
       isCarryingUpstreamDefect,
+      stationDistance,
+      upstreamDefectStationSeq,
+      latentPercent,
+      fitmentPercent,
+      residualPercent,
+      propagatedRiskScore,
       probCal,
       probWear,
       probThermal,
@@ -613,6 +637,12 @@ function VehicleDeepDiveContent() {
     isCriticalAtThisStation,
     isWithin3Sigma,
     isCarryingUpstreamDefect,
+    stationDistance,
+    upstreamDefectStationSeq,
+    latentPercent,
+    fitmentPercent,
+    residualPercent,
+    propagatedRiskScore,
     probCal,
     probWear,
     probThermal,
@@ -1063,7 +1093,7 @@ function VehicleDeepDiveContent() {
                           Downstream Propagated Defect Risk (Chassis carrying uncontained anomaly from {upstreamAnomaly?.label || "S14"})
                         </h4>
                         <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono font-bold">
-                          {Math.max(55, Math.min(88, 92 - (selectedSeq - (upstreamAnomaly?.seq || 14)) * 2))}% Propagated Risk
+                          {propagatedRiskScore}% Propagated Risk (Δ+{stationDistance} Stations)
                         </span>
                       </div>
                       <p className="text-xs text-amber-200/90 leading-relaxed font-sans">
@@ -1089,12 +1119,12 @@ function VehicleDeepDiveContent() {
                     <div>
                       <div className="flex justify-between text-xs mb-1.5">
                         <span className="text-gray-300 font-medium">Latent Defect Persistence ({upstreamAnomaly?.label || "S14"})</span>
-                        <span className="text-amber-400 font-mono font-bold">65%</span>
+                        <span className="text-amber-400 font-mono font-bold">{latentPercent}%</span>
                       </div>
                       <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-amber-500 transition-all duration-300 rounded-full"
-                          style={{ width: "65%" }}
+                          style={{ width: `${latentPercent}%` }}
                         />
                       </div>
                     </div>
@@ -1102,12 +1132,12 @@ function VehicleDeepDiveContent() {
                     <div>
                       <div className="flex justify-between text-xs mb-1.5">
                         <span className="text-gray-300 font-medium">Downstream Fitment &amp; Alignment Risk</span>
-                        <span className="text-blue-400 font-mono font-bold">25%</span>
+                        <span className="text-blue-400 font-mono font-bold">{fitmentPercent}%</span>
                       </div>
                       <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-blue-500 transition-all duration-300 rounded-full"
-                          style={{ width: "25%" }}
+                          style={{ width: `${fitmentPercent}%` }}
                         />
                       </div>
                     </div>
@@ -1115,12 +1145,12 @@ function VehicleDeepDiveContent() {
                     <div>
                       <div className="flex justify-between text-xs mb-1.5">
                         <span className="text-gray-300 font-medium">Local Station S{selectedSeq.toString().padStart(2, '0')} Residual</span>
-                        <span className="text-emerald-400 font-mono font-bold">10%</span>
+                        <span className="text-emerald-400 font-mono font-bold">{residualPercent}%</span>
                       </div>
                       <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-emerald-500 transition-all duration-300 rounded-full"
-                          style={{ width: "10%" }}
+                          style={{ width: `${residualPercent}%` }}
                         />
                       </div>
                     </div>

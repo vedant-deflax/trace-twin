@@ -285,7 +285,7 @@ def diagnose_vehicle_at_station(
     key_contributors.append(thermal_benchmark_bullet)
     key_contributors.append(
         f"• Active Power: {power_info['actual_power_kw']:.1f} kW vs ML Optimal {power_info['min_achievable_power_kw']:.1f} kW "
-        f"(Avoidable Waste: +{power_info['avoidable_waste_kw']:.1f} kW, ${power_info['avoidable_energy_cost_hourly']:.2f}/hr)"
+        f"(Avoidable Waste: +{power_info['avoidable_waste_kw']:.1f} kW, ₹{power_info['avoidable_energy_cost_hourly']:.2f}/hr)"
     )
 
     return {

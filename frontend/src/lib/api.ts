@@ -5,7 +5,17 @@ export async function fetchAPI<T>(endpoint: string, options?: RequestInit): Prom
     ...options,
     headers: { "Content-Type": "application/json", ...options?.headers },
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    let errDetail = res.statusText;
+    try {
+      const errBody = await res.json();
+      if (errBody && errBody.detail) {
+        errDetail = typeof errBody.detail === "string" ? errBody.detail : JSON.stringify(errBody.detail);
+      }
+    } catch (_) {}
+    console.warn(`[TRACE-TWIN API] ${res.status} on ${endpoint}: ${errDetail}`);
+    throw new Error(`API ${res.status}: ${errDetail}`);
+  }
   return res.json();
 }
 
