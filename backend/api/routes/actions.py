@@ -32,3 +32,23 @@ async def execute_action(req: ActionExecuteRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class EnergyOptimizeRequest(BaseModel):
+    station_id: Optional[str] = None
+    action_label: Optional[str] = "ML Thermal & Power Optimization"
+
+
+@router.post("/optimize-energy")
+async def optimize_energy(req: Optional[EnergyOptimizeRequest] = None):
+    """Executes ML-recommended thermal operating setpoints, servo recalibrations,
+    and idle standby optimization across target stations or the entire line.
+    """
+    try:
+        st_id = req.station_id if req else None
+        lbl = req.action_label if req else "ML Thermal & Power Optimization"
+        result = streamer.optimize_energy(station_id=st_id, action_label=lbl)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useStream } from "@/context/StreamContext";
 import { usePersona } from "@/lib/PersonaContext";
@@ -15,7 +15,7 @@ import { fetchAPI, AnomalyDetail, ProcessEvent } from "@/lib/api";
 export default function CommandCenterPage() {
   const { stations, kpis, vehicles, anomalies, loading, error, forceRefresh } = useStream();
   const { persona, setPersona } = usePersona();
-  const [selectedStationId, setSelectedStationId] = useState<string>("STATION_14");
+  const [selectedStationId, setSelectedStationId] = useState<string>("STATION_01");
   const [selectedScenario, setSelectedScenario] = useState<string>("Emergency E-Stop");
   const [actionExecuting, setActionExecuting] = useState<boolean>(false);
   const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
@@ -29,6 +29,206 @@ export default function CommandCenterPage() {
       }
     }
   }, []);
+
+  // Keyboard Arrow Navigation (← / →) across the 30 assembly stations
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      if (
+        active &&
+        (active.tagName === "INPUT" ||
+          active.tagName === "TEXTAREA" ||
+          active.tagName === "SELECT" ||
+          (active as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        const currentMatch = selectedStationId.match(/_(\d+)$/);
+        const currentSeq = currentMatch ? parseInt(currentMatch[1], 10) : 1;
+        const nextSeq = Math.min(30, currentSeq + 1);
+        const nextId = `STATION_${nextSeq.toString().padStart(2, "0")}`;
+        setSelectedStationId(nextId);
+
+        // Auto-scroll the active station node into view
+        const el = document.getElementById(`station-card-${nextId}`);
+        el?.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        const currentMatch = selectedStationId.match(/_(\d+)$/);
+        const currentSeq = currentMatch ? parseInt(currentMatch[1], 10) : 1;
+        const prevSeq = Math.max(1, currentSeq - 1);
+        const prevId = `STATION_${prevSeq.toString().padStart(2, "0")}`;
+        setSelectedStationId(prevId);
+
+        // Auto-scroll the active station node into view
+        const el = document.getElementById(`station-card-${prevId}`);
+        el?.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedStationId]);
+
+  const selectedStation = stations.find(s => s.id === selectedStationId) || stations[0];
+  const hasSensors = selectedStation?.has_sensors !== false; // boolean in api.ts
+
+  // Real-time metrics from SSE stream
+  const cycleTime = (selectedStation as any)?.cycle_time || 0;
+  const vibration = (selectedStation as any)?.vibration || 0;
+  const temp = (selectedStation as any)?.temperature || 0;
+  const torque = (selectedStation as any)?.torque || 0;
+  
+  const baseline = selectedStation?.baseline;
+  const ctDiff = (selectedStation as any)?.ct_residual !== undefined 
+    ? Number((selectedStation as any).ct_residual) 
+    : (baseline ? (cycleTime - baseline.expected_cycle_time_sec) : 0);
+  const vibDiff = (selectedStation as any)?.vib_residual !== undefined 
+    ? Number((selectedStation as any).vib_residual) 
+    : (baseline ? (vibration - baseline.expected_vibration_mm_s) : 0);
+  const tempDiff = (selectedStation as any)?.temp_residual !== undefined 
+    ? Number((selectedStation as any).temp_residual) 
+    : (baseline ? (temp - baseline.expected_temperature_c) : 0);
+
+  const isTorqueStation = [1, 2, 7, 8, 14, 26, 27].includes(selectedStation?.sequence_no || 0);
+  const torqueDelta = isTorqueStation
+    ? ((selectedStation as any)?.torque_residual !== undefined 
+        ? Number((selectedStation as any).torque_residual) 
+        : (torque - 42.0))
+    : 0.0;
+
+  // ML Power Consumption & Thermal Optimization
+  const seq = selectedStation?.sequence_no || 1;
+  const idleKw = (1 <= seq && seq <= 10) || seq === 14 
+    ? 9.5 + (seq % 3) * 0.8 
+    : (11 <= seq && seq <= 18 ? 8.0 + (seq % 4) * 0.9 : 4.8 + (seq % 4) * 0.7);
+
+  const optTemp = (selectedStation as any)?.optimal_plant_temp_c 
+    ?? ((1 <= seq && seq <= 10) || seq === 14 
+        ? 34.0 + seq * 0.3 
+        : (11 <= seq && seq <= 18 
+            ? (seq === 11 || seq === 12 ? 48.0 : (seq === 17 ? 60.0 : 38.0)) 
+            : 28.0 + (seq % 3) * 1.5));
+
+  const optPower = (selectedStation as any)?.min_achievable_power_kw 
+    ?? Number((idleKw + (isTorqueStation ? 42.0 * 0.115 : 0) + (baseline?.expected_cycle_time_sec ?? 65.0) / 60.0 * 1.85).toFixed(1));
+
+  const actPower = (selectedStation as any)?.actual_power_kw 
+    ?? Number(Math.max(optPower, idleKw + (torque > 0 ? torque * 0.115 : 0) + (cycleTime / 60.0) * 1.85 + Math.abs(temp - optTemp) * 0.15).toFixed(1));
+
+  const diffPower = (selectedStation as any)?.avoidable_waste_kw 
+    ?? Number(Math.max(0, actPower - optPower).toFixed(1));
+  const hourlyCost = (selectedStation as any)?.avoidable_energy_cost_hourly 
+    ?? Number((diffPower * 0.12).toFixed(2));
+
+  // Active anomaly resolution: check if selected station has an open anomaly,
+  // or fall back to any active open anomaly on the line
+  const activeStationAnomaly = anomalies.find(
+    a => a.status === 'open' && (a.station?.id === selectedStation?.id || (a as any).station_id === selectedStation?.id)
+  );
+  const openLineAnomaly = anomalies.find(a => a.status === 'open');
+  const anomaly = activeStationAnomaly || openLineAnomaly || null;
+  const blastRadiusVehicles = anomaly?.blast_radius || [];
+
+  // Dynamic Root Cause & Percentage Calculation per station
+  const rootCauseData = useMemo(() => {
+    if (!selectedStation) {
+      return { isNominal: true, causes: [], confidence: 99.0, maxZ: 0, severity: "nominal" as const };
+    }
+
+
+    const seq = selectedStation.sequence_no || 1;
+    const stStatus = selectedStation.status || "normal";
+    
+    // Sensor Z-scores based on baseline deviations (sigma: CT=1.2s, Vib=0.15mm/s, Temp=0.8°C, Torque=1.1Nm)
+    const zCT = Math.abs(ctDiff) / 1.2;
+    const zVib = Math.abs(vibDiff) / 0.15;
+    const zTemp = Math.abs(tempDiff) / 0.8;
+    const zTorque = isTorqueStation ? Math.abs(torqueDelta) / 1.1 : 0.0;
+
+    const maxZ = Math.max(zCT, zVib, zTemp, zTorque);
+
+    // Evaluate selectedStation directly:
+    // If all sensor variances are within ±1.5σ OR station status is "normal" with no active anomaly:
+    const isWithin1_5Sigma = zCT <= 1.5 && zVib <= 1.5 && zTemp <= 1.5 && zTorque <= 1.5;
+    const isNominal = !activeStationAnomaly && (stStatus === "normal" || isWithin1_5Sigma);
+
+    if (isNominal) {
+      return {
+        isNominal: true,
+        causes: [],
+        confidence: 99.0,
+        maxZ: Number(maxZ.toFixed(1)),
+        severity: "nominal" as const,
+      };
+    }
+
+    // Dynamic Root Cause Labels by Station Type:
+    // 1. Frame & Weld stations (S01–S10, S14)
+    // 2. Paint & Sealing stations (S11–S18, except S14)
+    // 3. Final Assembly stations (S19–S30)
+    let l1 = "";
+    let l2 = "";
+    let l3 = "";
+    let raw1 = 0.1;
+    let raw2 = 0.1;
+    let raw3 = 0.1;
+
+    if ((seq >= 1 && seq <= 10) || seq === 14) {
+      l1 = "Tool Wear & Fastener Fatigue";
+      l2 = "Hydraulic Pressure Drop";
+      l3 = "Thermal Expansion";
+      raw1 = Math.max(0.1, (isTorqueStation ? zTorque * 2.5 : 0) + zVib * 2.0);
+      raw2 = Math.max(0.1, zCT * 2.2 + zVib * 0.5);
+      raw3 = Math.max(0.1, zTemp * 2.0);
+    } else if (seq >= 11 && seq <= 18) {
+      l1 = "Viscosity & Flow Drift";
+      l2 = "Nozzle Clogging";
+      l3 = "Curing Oven Thermal Variance";
+      raw1 = Math.max(0.1, zCT * 2.4);
+      raw2 = Math.max(0.1, zVib * 2.2);
+      raw3 = Math.max(0.1, zTemp * 2.8);
+    } else {
+      l1 = "Spindle Torque Miscalibration";
+      l2 = "Fitment Geometry Resistance";
+      l3 = "Pneumatic Tool Backlash";
+      raw1 = Math.max(0.1, isTorqueStation ? zTorque * 2.5 : zCT * 1.5);
+      raw2 = Math.max(0.1, zVib * 2.2 + zCT * 1.2);
+      raw3 = Math.max(0.1, zCT * 1.8 + zTemp * 0.8);
+    }
+
+    // Softmax / Proportion Normalization (strict positive percentages summing to 100.0%)
+    const sum = raw1 + raw2 + raw3;
+    const rawP1 = (raw1 / sum) * 100.0;
+    const rawP2 = (raw2 / sum) * 100.0;
+
+    const p1 = Math.max(5.0, Math.min(85.0, Number(rawP1.toFixed(1))));
+    const p2 = Math.max(5.0, Math.min(85.0, Number(rawP2.toFixed(1))));
+    const p3 = Number(Math.max(0.0, 100.0 - p1 - p2).toFixed(1));
+
+    const causes = [
+      { label: l1, pct: p1 },
+      { label: l2, pct: p2 },
+      { label: l3, pct: p3 },
+    ]
+      .sort((a, b) => b.pct - a.pct)
+      .map((c, i) => ({ ...c, isPrimary: i === 0 }));
+
+    // Dynamic model confidence: 65.0 + maxZ * 8.5 clamped between 70.0% and 99.0%
+    const confidence = Math.min(99.0, Math.max(70.0, 65.0 + maxZ * 8.5));
+    const severity = (maxZ > 3.0 || stStatus === "anomaly") ? ("critical" as const) : ("warning" as const);
+
+    return {
+      isNominal: false,
+      causes,
+      confidence: Number(confidence.toFixed(1)),
+      maxZ: Number(maxZ.toFixed(1)),
+      severity,
+    };
+  }, [selectedStation, ctDiff, vibDiff, tempDiff, torqueDelta, isTorqueStation, activeStationAnomaly]);
 
   if (loading) {
     return (
@@ -52,29 +252,6 @@ export default function CommandCenterPage() {
       </div>
     );
   }
-
-  const selectedStation = stations.find(s => s.id === selectedStationId) || stations[0];
-  const hasSensors = selectedStation?.has_sensors !== false; // boolean in api.ts
-
-  // Real-time metrics from SSE stream
-  const cycleTime = (selectedStation as any)?.cycle_time || 0;
-  const vibration = (selectedStation as any)?.vibration || 0;
-  const temp = (selectedStation as any)?.temperature || 0;
-  const torque = (selectedStation as any)?.torque || 0;
-  
-  const baseline = selectedStation?.baseline;
-  const ctDiff = baseline ? (cycleTime - baseline.expected_cycle_time_sec) : 0;
-  const vibDiff = baseline ? (vibration - baseline.expected_vibration_mm_s) : 0;
-  const tempDiff = baseline ? (temp - baseline.expected_temperature_c) : 0;
-
-  // Active anomaly resolution: check if selected station has an open anomaly,
-  // or fall back to any active open anomaly on the line
-  const activeStationAnomaly = anomalies.find(
-    a => a.status === 'open' && (a.station?.id === selectedStation?.id || (a as any).station_id === selectedStation?.id)
-  );
-  const openLineAnomaly = anomalies.find(a => a.status === 'open');
-  const anomaly = activeStationAnomaly || openLineAnomaly || null;
-  const blastRadiusVehicles = anomaly?.blast_radius || [];
 
   return (
     <div className="p-6 max-w-[1800px] mx-auto flex flex-col gap-6">
@@ -214,86 +391,165 @@ export default function CommandCenterPage() {
               </div>
 
               {/* Gauges Grid */}
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 relative overflow-hidden">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+                {/* Cycle Time */}
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-3.5 relative overflow-hidden">
                   <div className={`absolute top-0 right-0 w-12 h-12 bg-gradient-to-br ${ctDiff > 10 ? 'from-red-500/20' : ctDiff > 5 ? 'from-amber-500/20' : 'from-cyan-500/20'} to-transparent rounded-bl-full blur-xl`}></div>
                   <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Clock className="w-3 h-3"/> Cycle Time</p>
                   <div className="flex items-end gap-2">
-                    <span className="text-3xl font-mono text-white">{cycleTime.toFixed(1)}s</span>
-                    <span className={`text-sm font-mono mb-1 ${ctDiff > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    <span className="text-2xl font-mono text-white">{cycleTime.toFixed(1)}s</span>
+                    <span className={`text-xs font-mono mb-0.5 ${ctDiff > 0 ? 'text-red-400' : 'text-green-400'}`}>
                       {ctDiff > 0 ? '+' : ''}{ctDiff.toFixed(1)}s
                     </span>
                   </div>
                 </div>
-                <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 relative overflow-hidden">
+
+                {/* Vibration */}
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-3.5 relative overflow-hidden">
                   <div className={`absolute top-0 right-0 w-12 h-12 bg-gradient-to-br ${vibDiff > 1 ? 'from-red-500/20' : 'from-cyan-500/20'} to-transparent rounded-bl-full blur-xl`}></div>
                   <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Activity className="w-3 h-3"/> Vibration</p>
                   <div className="flex items-end gap-2">
-                    <span className="text-3xl font-mono text-white">{vibration.toFixed(1)}</span>
-                    <span className={`text-sm font-mono mb-1 ${vibDiff > 0 ? 'text-amber-400' : 'text-green-400'}`}>
+                    <span className="text-2xl font-mono text-white">{vibration.toFixed(1)}</span>
+                    <span className={`text-xs font-mono mb-0.5 ${vibDiff > 0 ? 'text-amber-400' : 'text-green-400'}`}>
                       {vibDiff > 0 ? '+' : ''}{vibDiff.toFixed(1)}
                     </span>
                   </div>
                 </div>
-                <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 relative overflow-hidden">
+
+                {/* Process Temperature */}
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-3.5 relative overflow-hidden">
                   <div className={`absolute top-0 right-0 w-12 h-12 bg-gradient-to-br ${tempDiff > 5 ? 'from-red-500/20' : 'from-cyan-500/20'} to-transparent rounded-bl-full blur-xl`}></div>
                   <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Thermometer className="w-3 h-3"/> Temperature</p>
                   <div className="flex items-end gap-2">
-                    <span className="text-3xl font-mono text-white">{temp.toFixed(1)}°C</span>
-                    <span className={`text-sm font-mono mb-1 ${tempDiff > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    <span className="text-2xl font-mono text-white">{temp.toFixed(1)}°C</span>
+                    <span className={`text-xs font-mono mb-0.5 ${tempDiff > 0 ? 'text-red-400' : 'text-green-400'}`}>
                       {tempDiff > 0 ? '+' : ''}{tempDiff.toFixed(1)}
                     </span>
                   </div>
                 </div>
-                <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 relative overflow-hidden">
-                  <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Zap className="w-3 h-3"/> Torque (Inferred)</p>
+
+                {/* Torque */}
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-3.5 relative overflow-hidden">
+                  <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Zap className="w-3 h-3 text-amber-400"/> Torque</p>
                   <div className="flex items-end gap-2">
-                    <span className="text-3xl font-mono text-white">{torque.toFixed(1)}</span>
-                    <span className="text-sm font-mono mb-1 text-gray-400">Nm</span>
+                    <span className="text-2xl font-mono text-white">{torque.toFixed(1)}</span>
+                    <span className="text-xs font-mono mb-0.5 text-gray-400">Nm</span>
+                  </div>
+                </div>
+
+                {/* Active Power Draw (kW) */}
+                <div className="bg-gray-900 border border-emerald-500/20 rounded-lg p-3.5 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-12 h-12 bg-emerald-500/10 rounded-bl-full blur-xl"></div>
+                  <p className="text-xs text-emerald-400 mb-1 flex items-center gap-1"><Zap className="w-3 h-3 text-emerald-400"/> Active Power</p>
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <span className="text-2xl font-mono font-bold text-white">{actPower.toFixed(1)}</span>
+                      <span className="text-xs font-mono text-gray-400 ml-1">kW</span>
+                    </div>
+                    <div className="text-right">
+                      <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${diffPower > 0.5 ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                        {diffPower > 0.1 ? `+${diffPower.toFixed(1)} kW` : 'OPTIMAL'}
+                      </span>
+                      <p className="text-[9px] text-gray-500 mt-0.5 font-mono">Opt: {optPower.toFixed(1)} kW</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Thermal Efficiency Target */}
+                <div className="bg-gray-900 border border-blue-500/20 rounded-lg p-3.5 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-12 h-12 bg-blue-500/10 rounded-bl-full blur-xl"></div>
+                  <p className="text-xs text-blue-400 mb-1 flex items-center gap-1"><Gauge className="w-3 h-3 text-blue-400"/> Thermal Target</p>
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <span className="text-2xl font-mono font-bold text-white">{optTemp.toFixed(1)}</span>
+                      <span className="text-xs font-mono text-gray-400 ml-1">°C</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">
+                        ±1.5°C Env
+                      </span>
+                      <p className="text-[9px] text-gray-500 mt-0.5 font-mono">Cur: {temp.toFixed(1)}°C</p>
+                    </div>
                   </div>
                 </div>
               </div>
 
               {/* Root Cause / Confidence */}
               <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500"></div>
+                <div className={`absolute top-0 left-0 w-1 h-full ${
+                  rootCauseData.severity === "nominal" 
+                    ? "bg-emerald-500" 
+                    : rootCauseData.severity === "warning" 
+                    ? "bg-amber-500" 
+                    : "bg-red-500"
+                }`}></div>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-sm font-bold text-white">Probabilistic Root Cause</h3>
-                  {anomaly && anomaly.confidence_score && (
-                    <span className="text-[10px] px-2 py-1 bg-cyan-500/10 text-cyan-400 rounded-full font-mono flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3" /> {anomaly.confidence_score.toFixed(0)}% Model Confidence
+                  {rootCauseData.severity === "nominal" ? (
+                    <span className="text-[10px] px-2 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded-full font-mono flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3" /> Nominal 3-Sigma ({rootCauseData.confidence.toFixed(0)}% Conf)
+                    </span>
+                  ) : rootCauseData.severity === "warning" ? (
+                    <span className="text-[10px] px-2 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-full font-mono flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" /> {rootCauseData.confidence.toFixed(0)}% Model Confidence ({rootCauseData.maxZ}σ Warning)
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-2 py-1 bg-red-500/10 text-red-400 border border-red-500/30 rounded-full font-mono flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" /> {rootCauseData.confidence.toFixed(0)}% Model Confidence ({rootCauseData.maxZ}σ Critical)
                     </span>
                   )}
                 </div>
                 
-                {anomaly && anomaly.root_causes ? (
+                {!rootCauseData.isNominal ? (
                   <div className="space-y-4">
-                    {anomaly.root_causes.map((cause, idx) => {
-                      const isPrimary = idx === 0;
+                    {rootCauseData.causes.map((cause) => {
+                      const isCritical = rootCauseData.severity === "critical";
                       return (
-                        <div key={cause.cause_label}>
+                        <div key={cause.label}>
                           <div className="flex justify-between text-xs mb-1">
-                            <span className={`${isPrimary ? "text-white" : "text-gray-400"} font-medium flex items-center gap-1.5`}>
-                              <span className={`w-2 h-2 rounded-full ${isPrimary ? "bg-cyan-500" : "bg-gray-600"}`}></span> {cause.cause_label.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase())}
+                            <span className={`${cause.isPrimary ? "text-white font-semibold" : "text-gray-400"} text-xs flex items-center gap-1.5`}>
+                              <span className={`w-2 h-2 rounded-full ${
+                                cause.isPrimary 
+                                  ? (isCritical ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" : "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]") 
+                                  : "bg-gray-600"
+                              }`}></span> 
+                              {cause.label}
                             </span>
-                            <span className={`${isPrimary ? "text-cyan-400" : "text-gray-400"} font-mono`}>{cause.probability_pct.toFixed(1)}%</span>
+                            <span className={`${
+                              cause.isPrimary 
+                                ? (isCritical ? "text-red-400 font-bold" : "text-amber-400 font-bold") 
+                                : "text-gray-400"
+                            } font-mono`}>{cause.pct.toFixed(1)}%</span>
                           </div>
                           <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                            <div className={`h-full ${isPrimary ? "bg-cyan-500" : "bg-gray-600"}`} style={{ width: `${cause.probability_pct}%` }}></div>
+                            <div className={`h-full transition-all duration-300 ${
+                              cause.isPrimary 
+                                ? (isCritical ? "bg-red-500" : "bg-amber-500") 
+                                : "bg-gray-600"
+                            }`} style={{ width: `${cause.pct}%` }}></div>
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 ) : (
-                  <div className="bg-gray-800/50 border border-green-500/20 rounded p-4 text-center mt-2">
-                    <CheckCircle className="w-6 h-6 text-green-500 mx-auto mb-2" />
-                    <p className="text-sm font-semibold text-green-400">Nominal 3-Sigma Operation</p>
-                    <p className="text-xs text-gray-400 mt-1">No causal anomaly detected on selected station.</p>
+                  <div className="bg-gray-800/40 border border-emerald-500/20 rounded-lg p-4 text-center mt-2 shadow-[0_0_15px_rgba(16,185,129,0.05)]">
+                    <CheckCircle className="w-6 h-6 text-emerald-400 mx-auto mb-2" />
+                    <p className="text-sm font-semibold text-emerald-400">Nominal 3-Sigma Operation</p>
+                    <p className="text-xs text-gray-400 mt-1">All station sensors operating within baseline.</p>
                   </div>
                 )}
-                <div className="mt-4 pt-3 border-t border-gray-800 text-[10px] text-gray-500">
-                  <span className="text-gray-400 font-semibold">Sensor Density:</span> {hasSensors ? "100%" : "54% (Adjacent Interpolation)"}
+                <div className="mt-4 pt-3 border-t border-gray-800 text-[10px] text-gray-500 flex justify-between items-center">
+                  <span><span className="text-gray-400 font-semibold">Sensor Density:</span> {hasSensors ? "100%" : "54% (Adjacent Interpolation)"}</span>
+                  {!rootCauseData.isNominal && <span className="font-mono text-[9px] text-gray-500">Sum: 100.0%</span>}
+                </div>
+
+                {/* Thermal Efficiency Benchmark Note */}
+                <div className="mt-3 p-2.5 rounded-lg bg-gray-950/60 border border-gray-800/80 text-[11px] text-gray-300 flex items-start gap-2">
+                  <Thermometer className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+                  <p className="leading-relaxed font-sans">
+                    <strong className="text-white">Thermal Efficiency Benchmark:</strong> Current {temp.toFixed(1)}°C vs Optimal Target {optTemp.toFixed(1)}°C (±1.5°C operating envelope for max mechanical &amp; electrical efficiency).
+                  </p>
                 </div>
               </div>
             </div>
@@ -492,6 +748,128 @@ export default function CommandCenterPage() {
                       <p className="text-xs font-mono font-bold text-amber-400">9.8h Drift</p>
                       <span className="text-[9px] text-amber-300/80 bg-amber-500/10 px-1.5 py-0.2 rounded font-mono">52% Risk</span>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Energy Sustainability & Cost Optimization Panel */}
+              <div className="bg-gray-900 border border-emerald-500/30 rounded-xl p-4 mt-4 relative overflow-hidden shadow-lg">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 rounded-bl-full blur-xl pointer-events-none" />
+                <div className="flex items-center justify-between mb-3 border-b border-gray-800 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-md bg-emerald-500/20 flex items-center justify-center border border-emerald-500/40">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                        Energy Sustainability &amp; Cost Optimization
+                      </h3>
+                      <p className="text-[10px] text-gray-400">ML-Predicted Line Draw vs Fleet Theoretical Minimum</p>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold rounded font-mono">
+                    TARIFF: $0.12/kWh
+                  </span>
+                </div>
+
+                {/* Energy Metrics Grid */}
+                <div className="grid grid-cols-2 gap-3 mb-3.5">
+                  <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                    <p className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Total Line Power Draw</p>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-mono font-bold text-white">
+                        {(kpis?.total_line_power_kw ?? 274.5).toFixed(1)}
+                      </span>
+                      <span className="text-xs text-gray-400 font-mono">kW</span>
+                      <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20 ml-auto">
+                        Opt: {(kpis?.optimal_line_power_kw ?? 248.2).toFixed(1)} kW
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-amber-400 mt-1 font-mono">
+                      Avoidable Waste: +{(kpis?.avoidable_waste_kw ?? 26.3).toFixed(1)} kW ({(kpis?.avoidable_waste_kw ? ((kpis.avoidable_waste_kw / (kpis.total_line_power_kw || 1)) * 100).toFixed(1) : "9.6")}%)
+                    </p>
+                  </div>
+
+                  <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                    <p className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Avoidable Energy Waste</p>
+                    <div className="flex items-baseline gap-1.5 mt-1">
+                      <span className="text-2xl font-mono font-bold text-emerald-400">
+                        ${(kpis?.avoidable_energy_cost_daily ?? 75.74).toFixed(2)}
+                      </span>
+                      <span className="text-xs text-gray-400 font-mono">/ day</span>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1 font-mono">
+                      Hourly: ~${(kpis?.avoidable_energy_cost_hourly ?? 3.16).toFixed(2)}/hr ($27,645/yr run rate)
+                    </p>
+                  </div>
+                </div>
+
+                {/* Top 3 Energy Drain Stations */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Top 3 Energy Drain Stations &amp; AI Action</p>
+                    <span className="text-[9px] text-gray-500 font-mono">Click to Inspect</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {((kpis?.top_energy_drain_stations && kpis.top_energy_drain_stations.length > 0)
+                      ? kpis.top_energy_drain_stations
+                      : [
+                          {
+                            station_id: "STATION_14",
+                            name: "Welding - Robot R14",
+                            sequence_no: 14,
+                            actual_power_kw: 16.8,
+                            min_achievable_power_kw: 13.4,
+                            avoidable_waste_kw: 3.4,
+                            hourly_waste_cost: 0.41,
+                            recommended_action: "S14: Recalibrate servo drive to reduce 3.4 kW thermal dissipation",
+                          },
+                          {
+                            station_id: "STATION_09",
+                            name: "Paint - Clear Coat P9",
+                            sequence_no: 9,
+                            actual_power_kw: 13.2,
+                            min_achievable_power_kw: 10.8,
+                            avoidable_waste_kw: 2.4,
+                            hourly_waste_cost: 0.29,
+                            recommended_action: "S09: Adjust oven heating zone dampers to trim 2.4 kW thermal waste",
+                          },
+                          {
+                            station_id: "STATION_26",
+                            name: "Assembly - Final A26",
+                            sequence_no: 26,
+                            actual_power_kw: 9.6,
+                            min_achievable_power_kw: 7.8,
+                            avoidable_waste_kw: 1.8,
+                            hourly_waste_cost: 0.22,
+                            recommended_action: "S26: Service pneumatic valve to eliminate 1.8 kW pressure leakage",
+                          },
+                        ]
+                    ).map((ds, idx) => (
+                      <div
+                        key={ds.station_id}
+                        onClick={() => setSelectedStationId(ds.station_id)}
+                        className={`p-2.5 rounded-lg border transition-all cursor-pointer flex items-center justify-between ${
+                          selectedStationId === ds.station_id
+                            ? "bg-emerald-950/30 border-emerald-500/50 shadow-[0_0_10px_rgba(16,185,129,0.2)]"
+                            : "bg-gray-950/40 border-gray-800/80 hover:border-gray-700"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-5 h-5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold font-mono flex items-center justify-center border border-emerald-500/30">
+                            {idx + 1}
+                          </span>
+                          <div>
+                            <p className="text-xs font-semibold text-white">Station {ds.sequence_no}: {ds.name}</p>
+                            <p className="text-[10px] text-emerald-300/90 font-sans">{ds.recommended_action}</p>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 ml-3">
+                          <p className="text-xs font-mono font-bold text-amber-400">+{ds.avoidable_waste_kw.toFixed(1)} kW</p>
+                          <span className="text-[9px] text-gray-400 font-mono">~${ds.hourly_waste_cost.toFixed(2)}/hr</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>

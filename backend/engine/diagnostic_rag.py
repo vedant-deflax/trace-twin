@@ -7,6 +7,7 @@ bullet-point engineering summaries for any chassis at any station.
 
 from typing import Optional
 from backend.db.init_db import STATIONS, BASELINES
+from backend.engine.inference import evaluate_station_power
 
 # ─── Factory Maintenance & Calibration Knowledge Corpus (RAG Base) ───────────
 MAINTENANCE_LOG_CORPUS = [
@@ -269,6 +270,24 @@ def diagnose_vehicle_at_station(
             f"Station Cpk: 1.74 (Optimal repeatability)",
         ]
 
+    power_info = evaluate_station_power(
+        seq=station_seq,
+        cycle_time=ct,
+        torque=torque,
+        temp=temp,
+        vib=vib,
+    )
+
+    thermal_benchmark_bullet = (
+        f"• Thermal Efficiency Benchmark: Current {temp:.1f}°C vs Optimal Target "
+        f"{power_info['optimal_plant_temp_c']:.1f}°C (±1.5°C operating envelope for max mechanical & electrical efficiency)."
+    )
+    key_contributors.append(thermal_benchmark_bullet)
+    key_contributors.append(
+        f"• Active Power: {power_info['actual_power_kw']:.1f} kW vs ML Optimal {power_info['min_achievable_power_kw']:.1f} kW "
+        f"(Avoidable Waste: +{power_info['avoidable_waste_kw']:.1f} kW, ${power_info['avoidable_energy_cost_hourly']:.2f}/hr)"
+    )
+
     return {
         "vehicle_id": vehicle_id,
         "station_seq": station_seq,
@@ -282,11 +301,21 @@ def diagnose_vehicle_at_station(
         "primary_root_cause": primary_root_cause,
         "causal_mechanism": causal_mechanism,
         "containment_action": containment_action,
+        "actual_power_kw": power_info["actual_power_kw"],
+        "min_achievable_power_kw": power_info["min_achievable_power_kw"],
+        "avoidable_waste_kw": power_info["avoidable_waste_kw"],
+        "avoidable_energy_cost_hourly": power_info["avoidable_energy_cost_hourly"],
+        "optimal_plant_temp_c": power_info["optimal_plant_temp_c"],
         "telemetry_summary": {
             "cycle_time_sec": ct,
             "vibration_mm_s": vib,
             "temperature_c": temp,
             "torque_nm": torque,
+            "actual_power_kw": power_info["actual_power_kw"],
+            "min_achievable_power_kw": power_info["min_achievable_power_kw"],
+            "avoidable_waste_kw": power_info["avoidable_waste_kw"],
+            "avoidable_energy_cost_hourly": power_info["avoidable_energy_cost_hourly"],
+            "optimal_plant_temp_c": power_info["optimal_plant_temp_c"],
             "delta_torque": delta_torque,
             "delta_vibration": delta_vib,
             "delta_temperature": delta_temp,
@@ -298,3 +327,4 @@ def diagnose_vehicle_at_station(
             "is_inferred": is_inferred,
         },
     }
+

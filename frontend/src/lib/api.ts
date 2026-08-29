@@ -19,7 +19,13 @@ export interface Station {
   resource_id: string | null;
   baseline: { expected_cycle_time_sec: number; expected_vibration_mm_s: number; expected_temperature_c: number } | null;
   status: "normal" | "warning" | "anomaly" | null;
+  actual_power_kw?: number;
+  min_achievable_power_kw?: number;
+  avoidable_waste_kw?: number;
+  avoidable_energy_cost_hourly?: number;
+  optimal_plant_temp_c?: number;
 }
+
 
 export interface ProcessEvent {
   id: number;
@@ -117,6 +123,21 @@ export interface FactoryKPIs {
   blind_stations_inferred: number;
   total_blind_stations: number;
   total_units_in_buffer: number;
+  total_line_power_kw?: number;
+  optimal_line_power_kw?: number;
+  avoidable_waste_kw?: number;
+  avoidable_energy_cost_hourly?: number;
+  avoidable_energy_cost_daily?: number;
+  top_energy_drain_stations?: {
+    station_id: string;
+    name: string;
+    sequence_no: number;
+    actual_power_kw: number;
+    min_achievable_power_kw: number;
+    avoidable_waste_kw: number;
+    hourly_waste_cost: number;
+    recommended_action: string;
+  }[];
 }
 
 export interface DiagnosticData {
@@ -132,11 +153,21 @@ export interface DiagnosticData {
   primary_root_cause: string;
   causal_mechanism: string;
   containment_action: string;
+  actual_power_kw?: number;
+  min_achievable_power_kw?: number;
+  avoidable_waste_kw?: number;
+  avoidable_energy_cost_hourly?: number;
+  optimal_plant_temp_c?: number;
   telemetry_summary: {
     cycle_time_sec: number;
     vibration_mm_s: number;
     temperature_c: number;
     torque_nm: number;
+    actual_power_kw?: number;
+    min_achievable_power_kw?: number;
+    avoidable_waste_kw?: number;
+    avoidable_energy_cost_hourly?: number;
+    optimal_plant_temp_c?: number;
     delta_torque: number;
     delta_vibration: number;
     delta_temperature: number;
@@ -148,3 +179,4 @@ export interface DiagnosticData {
     is_inferred: boolean;
   };
 }
+

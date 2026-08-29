@@ -114,6 +114,27 @@ def generate_production_telemetry(num_vehicles: int = 300, num_stations: int = 3
                     anomaly_type = "DOWNSTREAM_GEOMETRY_MISALIGNMENT"
                     is_anomaly = 2  # Propagated warning
 
+            # 4. Power consumption & thermal efficiency modeling
+            if (1 <= s <= 10) or s == 14:
+                idle_kw = 9.5 + (s % 3) * 0.8
+                opt_temp = 34.0 + (s * 0.3)
+            elif 11 <= s <= 18:
+                idle_kw = 8.0 + (s % 4) * 0.9
+                opt_temp = 48.0 if s in [11, 12] else (60.0 if s == 17 else 38.0)
+            else:
+                idle_kw = 4.8 + (s % 4) * 0.7
+                opt_temp = 28.0 + (s % 3) * 1.5
+
+            opt_torque_kw = (base["torque_mean"] * 0.115) if base["torque_mean"] > 0 else 0.0
+            opt_ct_kw = (base["ct_mean"] / 60.0) * 1.85
+            optimal_kw = round(idle_kw + opt_torque_kw + opt_ct_kw, 2)
+
+            torque_kw = (torque * 0.115) if torque > 0 else 0.0
+            ct_kw = (ct / 60.0) * 1.85
+            thermal_penalty_kw = abs(temp - opt_temp) * 0.15
+            actual_kw = round(max(optimal_kw, idle_kw + torque_kw + ct_kw + thermal_penalty_kw), 2)
+            waste_kw = round(max(0.0, actual_kw - optimal_kw), 2)
+
             timestamp = start_time + timedelta(seconds=(v_idx * 75) + (s * 65))
 
             records.append({
@@ -124,12 +145,17 @@ def generate_production_telemetry(num_vehicles: int = 300, num_stations: int = 3
                 "joint_torque": round(float(torque), 2) if torque > 0 else None,
                 "process_temperature": round(float(temp), 2),
                 "tool_vibration": round(float(vib), 3),
+                "power_kw": actual_kw,
+                "optimal_power_kw": optimal_kw,
+                "avoidable_waste_kw": waste_kw,
+                "optimal_temp_c": round(opt_temp, 1),
                 "is_anomaly": is_anomaly,
                 "anomaly_label": anomaly_type,
             })
 
     df = pd.DataFrame(records)
     return df
+
 
 
 def save_telemetry_csv(df: pd.DataFrame, target_path: Path = CSV_PATH) -> Path:
@@ -163,10 +189,15 @@ def generate_vehicle_cohort(num_vehicles: int = 300, start_id: int = 4800) -> Li
                 "vibration_mm_s": float(row["tool_vibration"]),
                 "temperature_c": float(row["process_temperature"]),
                 "torque_nm": float(row["joint_torque"]) if pd.notna(row["joint_torque"]) and row["joint_torque"] > 0 else BASE_TORQUE_NM,
+                "actual_power_kw": float(row.get("power_kw", 11.2)),
+                "min_achievable_power_kw": float(row.get("optimal_power_kw", 9.8)),
+                "avoidable_waste_kw": float(row.get("avoidable_waste_kw", 1.4)),
+                "optimal_plant_temp_c": float(row.get("optimal_temp_c", 35.0)),
                 "is_inferred": is_inferred,
                 "has_sensors": has_sensors,
                 "is_anomaly": int(row["is_anomaly"]),
                 "anomaly_label": str(row["anomaly_label"]),
+
                 "timestamp": str(row["timestamp"]),
             })
 

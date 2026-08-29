@@ -156,3 +156,79 @@ def predict_vehicle_risk(features: Dict[str, float]) -> Dict[str, Any]:
         "model_metrics": artifact.get("metrics", {}),
         "model_trained_at": artifact.get("trained_at"),
     }
+
+
+POWER_MODEL_PATH = Path(__file__).parent.parent / "ml" / "models" / "power_optimizer_model.joblib"
+_POWER_ARTIFACT: Optional[Dict[str, Any]] = None
+
+
+def load_power_model_artifact() -> Optional[Dict[str, Any]]:
+    global _POWER_ARTIFACT
+    if _POWER_ARTIFACT is None and POWER_MODEL_PATH.exists():
+        try:
+            _POWER_ARTIFACT = joblib.load(POWER_MODEL_PATH)
+        except Exception:
+            _POWER_ARTIFACT = None
+    return _POWER_ARTIFACT
+
+
+def get_optimal_station_temp(seq: int) -> float:
+    """Ideal station-specific thermal target for peak mechanical efficiency."""
+    if (1 <= seq <= 10) or seq == 14:
+        return round(34.0 + (seq * 0.3), 1)
+    elif 11 <= seq <= 18:
+        return 48.0 if seq in {11, 12} else (60.0 if seq == 17 else 38.0)
+    else:
+        return round(28.0 + (seq % 3) * 1.5, 1)
+
+
+def evaluate_station_power(
+    seq: int,
+    cycle_time: float,
+    torque: float,
+    temp: float,
+    vib: float,
+) -> Dict[str, Any]:
+    """Predict station power draw, optimal theoretical minimum, and avoidable waste."""
+    opt_temp = get_optimal_station_temp(seq)
+    temp_delta = abs(temp - opt_temp)
+    is_torque = 1 if seq in {1, 2, 7, 8, 14, 26, 27} else 0
+
+    artifact = load_power_model_artifact()
+    if artifact:
+        row = {
+            "sequence_no": seq,
+            "cycle_time_sec": cycle_time,
+            "torque_nm": torque if is_torque else 0.0,
+            "temperature_c": temp,
+            "vibration_mm_s": vib,
+            "temp_delta_from_opt": temp_delta,
+            "is_torque_station": is_torque,
+        }
+        df = pd.DataFrame([row])
+        act_pipeline = artifact["actual_pipeline"]
+        opt_pipeline = artifact["optimal_pipeline"]
+
+        pred_act = float(act_pipeline.predict(df)[0])
+        pred_opt = float(opt_pipeline.predict(df)[0])
+    else:
+        # Fallback physics calculation
+        idle_kw = 9.5 if (seq <= 10 or seq == 14) else (8.0 if seq <= 18 else 5.2)
+        pred_opt = idle_kw + (42.0 * 0.115 if is_torque else 0.0) + (65.0 / 60.0) * 1.85
+        torque_kw = (torque * 0.115) if is_torque else 0.0
+        pred_act = idle_kw + torque_kw + (cycle_time / 60.0) * 1.85 + temp_delta * 0.15
+
+    actual_kw = round(max(pred_opt, pred_act), 2)
+    min_kw = round(pred_opt, 2)
+    waste_kw = round(max(0.0, actual_kw - min_kw), 2)
+    hourly_cost = round(waste_kw * 0.12, 3)  # standard industrial tariff $0.12/kWh
+
+    return {
+        "actual_power_kw": actual_kw,
+        "min_achievable_power_kw": min_kw,
+        "avoidable_waste_kw": waste_kw,
+        "avoidable_energy_cost_hourly": hourly_cost,
+        "optimal_plant_temp_c": opt_temp,
+        "temp_delta_c": round(temp_delta, 1),
+    }
+

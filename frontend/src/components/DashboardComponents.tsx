@@ -37,6 +37,7 @@ import { usePersona } from "@/lib/PersonaContext";
 // ─────────────────────── Line Overview ───────────────────────
 
 function StationCard({ station, selected, onClick }: { station: Station; selected?: boolean; onClick?: () => void }) {
+  const cardRef = React.useRef<HTMLButtonElement>(null);
   const statusColors: Record<string, string> = {
     normal: "bg-green-500",
     warning: "bg-amber-500",
@@ -50,8 +51,19 @@ function StationCard({ station, selected, onClick }: { station: Station; selecte
   const st = station.status || "normal";
   const { persona } = usePersona();
 
+  // Auto-scroll selected station card into view
+  useEffect(() => {
+    if (selected && cardRef.current) {
+      cardRef.current.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+    }
+  }, [selected]);
+
   return (
-    <button onClick={onClick} className={`relative flex flex-col items-center p-3 rounded-lg border transition-all min-w-[90px] ${
+    <button
+      ref={cardRef}
+      id={`station-card-${station.id}`}
+      onClick={onClick}
+      className={`relative flex flex-col items-center p-3 rounded-lg border transition-all min-w-[90px] ${
         st === "anomaly"
           ? "border-red-500/50 bg-red-500/5"
           : st === "warning"
@@ -110,9 +122,12 @@ function LineOverview({ stations, selectedId, onSelect }: { stations: Station[];
   return (
     <section className="mb-8">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Activity className="w-5 h-5 text-cyan-400" />
           <h2 className="text-lg font-semibold text-white">Assembly Line Overview (30 Stations)</h2>
+          <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded bg-cyan-950/40 border border-cyan-500/30 text-[11px] font-mono text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.15)]">
+            [Use ← / → Arrow Keys to Navigate Stations]
+          </span>
         </div>
         <div className="flex items-center gap-4 text-xs">
           <span className="flex items-center gap-1.5">

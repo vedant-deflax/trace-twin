@@ -17,7 +17,9 @@ import {
   Wrench,
   FileText,
   Sparkles,
+  Zap,
 } from "lucide-react";
+
 
 function VehicleDeepDiveContent() {
   const searchParams = useSearchParams();
@@ -464,23 +466,53 @@ function VehicleDeepDiveContent() {
       ? `Chassis ${currentVehicle.id.replace("VEH_", "#")} carries uncontained defect from ${upstreamAnomaly?.label || "S14"}. Inspect joint fitment & route to offline QA Buffer B.`
       : `No containment required. Chassis cleared for standard conveyor downstream progression.`;
 
+    const isTorque = [1, 2, 7, 8, 14, 26, 27].includes(selectedSeq);
+    const optTemp = (1 <= selectedSeq && selectedSeq <= 10) || selectedSeq === 14 
+      ? 34.0 + selectedSeq * 0.3 
+      : (11 <= selectedSeq && selectedSeq <= 18 
+          ? (selectedSeq === 11 || selectedSeq === 12 ? 48.0 : (selectedSeq === 17 ? 60.0 : 38.0)) 
+          : 28.0 + (selectedSeq % 3) * 1.5);
+
+    const idleKw = (1 <= selectedSeq && selectedSeq <= 10) || selectedSeq === 14 
+      ? 9.5 + (selectedSeq % 3) * 0.8 
+      : (11 <= selectedSeq && selectedSeq <= 18 
+          ? 8.0 + (selectedSeq % 4) * 0.9 
+          : 4.8 + (selectedSeq % 4) * 0.7);
+
+    const optimalPower = targetStation?.min_achievable_power_kw 
+      ?? Number((idleKw + (isTorque ? 42.0 * 0.115 : 0) + (baseline?.expected_cycle_time_sec ?? 65.0) / 60.0 * 1.85).toFixed(1));
+
+    const carPower = targetStation?.actual_power_kw 
+      ?? Number(Math.max(optimalPower, idleKw + (carTorque > 0 ? carTorque * 0.115 : 0) + (carCt / 60.0) * 1.85 + Math.abs(carTemp - optTemp) * 0.15).toFixed(1));
+
+    const diffPower = Number(Math.max(0, carPower - optimalPower).toFixed(1));
+
+    const thermalBenchmarkBullet = `• Thermal Efficiency Benchmark: Current ${carTemp.toFixed(1)}°C vs Optimal Target ${optTemp.toFixed(1)}°C (±1.5°C operating envelope for max mechanical & electrical efficiency).`;
+    const powerBullet = `• Active Power: ${carPower.toFixed(1)} kW vs ML Optimal ${optimalPower.toFixed(1)} kW (Waste: +${diffPower.toFixed(1)} kW)`;
+
     const optimisticContributors = isCriticalAtThisStation
       ? [
           `Torque: +${diffTorque.toFixed(1)} Nm (+${zTorque.toFixed(1)}σ)`,
           `Vibration: +${diffVib.toFixed(2)} mm/s (+${zVib.toFixed(1)}σ)`,
           `Cycle Time: +${diffCt.toFixed(1)}s (+${zCt.toFixed(1)}σ)`,
-          `Temperature: +${diffTemp.toFixed(1)}°C (+${zTemp.toFixed(1)}σ)`
+          `Temperature: +${diffTemp.toFixed(1)}°C (+${zTemp.toFixed(1)}σ)`,
+          thermalBenchmarkBullet,
+          powerBullet,
         ]
       : isCarryingUpstreamDefect
       ? [
           `Upstream Persistence: 65%`,
           `Fitment & Alignment Risk: 25%`,
-          `Local Station S${selectedSeq.toString().padStart(2, '0')} Residual: 10%`
+          `Local Station S${selectedSeq.toString().padStart(2, '0')} Residual: 10%`,
+          thermalBenchmarkBullet,
+          powerBullet,
         ]
       : [
           `Process Variance: < 1.0σ`,
           `Sensor Health: Nominal`,
-          `Alignment: 100%`
+          `Alignment: 100%`,
+          thermalBenchmarkBullet,
+          powerBullet,
         ];
 
     const optimisticDocs = isCriticalAtThisStation
@@ -513,6 +545,10 @@ function VehicleDeepDiveContent() {
       carTorque,
       carTemp,
       carVib,
+      carPower,
+      optimalPower,
+      diffPower,
+      optTemp,
       isInferred,
       diffCt,
       diffTorque,
@@ -559,7 +595,12 @@ function VehicleDeepDiveContent() {
     carTorque,
     carTemp,
     carVib,
+    carPower,
+    optimalPower,
+    diffPower,
+    optTemp,
     isInferred,
+
     diffCt,
     diffTorque,
     diffTemp,
@@ -872,6 +913,31 @@ function VehicleDeepDiveContent() {
                     <td className="py-4 pl-4 text-right">
                       <span className={`inline-block px-2.5 py-1 rounded text-xs font-bold ${badgeVib.badgeClass}`}>
                         {badgeVib.text}
+                      </span>
+                    </td>
+                  </tr>
+
+                  {/* Active Power Draw */}
+                  <tr className="border-t border-gray-800/50 hover:bg-gray-800/20 transition-colors">
+                    <td className="py-4 pr-4 font-sans font-semibold text-gray-300 flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" /> Active Power Draw
+                    </td>
+                    <td className="py-4 px-4 font-bold text-white text-sm">
+                      {carPower.toFixed(1)} kW
+                    </td>
+                    <td className="py-4 px-4 text-gray-400">
+                      {optimalPower.toFixed(1)} kW
+                      <span className="text-[10px] text-emerald-400 block font-sans">ML Optimal Baseline</span>
+                    </td>
+                    <td className="py-4 pl-4 text-right">
+                      <span className={`inline-block px-2.5 py-1 rounded text-xs font-bold ${
+                        diffPower > 2.0 
+                          ? "bg-red-500/20 text-red-400 border border-red-500/30" 
+                          : diffPower > 0.5 
+                          ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" 
+                          : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                      }`}>
+                        {diffPower > 0.1 ? `+${diffPower.toFixed(1)} kW (Waste)` : "OPTIMAL (0.0 kW)"}
                       </span>
                     </td>
                   </tr>

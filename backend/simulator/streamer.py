@@ -27,7 +27,9 @@ from backend.engine.anomaly_detector import resolve_station_anomaly
 from backend.engine.inference import (
     extract_features_from_telemetry,
     predict_vehicle_risk,
+    evaluate_station_power,
 )
+
 
 # Station classification sets
 TORQUE_STATIONS = {1, 2, 7, 8, 14, 26, 27}
@@ -198,6 +200,49 @@ class SimulationStreamer:
             "station_id": station_id,
             "scenario_label": scenario_label,
         }
+
+    def optimize_energy(self, station_id: Optional[str] = None, action_label: Optional[str] = None) -> dict:
+        """Executes ML-recommended thermal operating setpoints, servo recalibrations,
+        and idle standby optimization across target stations or the entire line.
+        """
+        conn = get_sync_connection()
+        try:
+            if station_id and station_id != "ALL":
+                try:
+                    seq = int(station_id.replace("STATION_", ""))
+                except Exception:
+                    seq = 14
+                self.station_thermal_drift[seq] = 0.0
+                self.thermal_excursions.pop(seq, None)
+                self.station_wear_state[seq] = max(0.0, self.station_wear_state.get(seq, 0.0) * 0.1)
+                self.pink_noise_state[seq] = {"ct": 0.0, "vib": 0.0, "temp": 0.0, "torque": 0.0}
+                target_desc = f"Station {seq}"
+            else:
+                for s in range(1, 31):
+                    self.station_thermal_drift[s] = 0.0
+                    self.thermal_excursions.pop(s, None)
+                    self.station_wear_state[s] = max(0.0, self.station_wear_state.get(s, 0.0) * 0.1)
+                    self.pink_noise_state[s] = {"ct": 0.0, "vib": 0.0, "temp": 0.0, "torque": 0.0}
+                target_desc = "All 30 Assembly Stations"
+
+            self._update_global_state(conn, [])
+            conn.close()
+
+            lbl = action_label or "ML Thermal & Power Optimization"
+            print(f"ENERGY OPTIMIZATION EXECUTED: '{lbl}' on {target_desc}.")
+            return {
+                "status": "success",
+                "message": f"ML Energy Optimization applied: '{lbl}' on {target_desc}. Thermal setpoints aligned to optimal curve.",
+                "target": station_id or "ALL",
+                "action_label": lbl,
+                "total_line_power_kw": GLOBAL_STATE["kpis"].get("total_line_power_kw"),
+                "avoidable_waste_kw": GLOBAL_STATE["kpis"].get("avoidable_waste_kw"),
+                "avoidable_energy_cost_daily": GLOBAL_STATE["kpis"].get("avoidable_energy_cost_daily"),
+            }
+        except Exception as e:
+            if conn:
+                conn.close()
+            raise e
 
     # ── Tick ──────────────────────────────────────────────────────────────────
     def _process_tick(self):
@@ -373,10 +418,25 @@ class SimulationStreamer:
             s["temperature"] = live_temp
             s["torque"] = live_torque
 
+            # Power metrics evaluation via ML power optimizer
+            pwr = evaluate_station_power(
+                seq=seq,
+                cycle_time=live_ct,
+                torque=live_torque,
+                temp=live_temp,
+                vib=live_vib,
+            )
+            s["actual_power_kw"] = pwr["actual_power_kw"]
+            s["min_achievable_power_kw"] = pwr["min_achievable_power_kw"]
+            s["avoidable_waste_kw"] = pwr["avoidable_waste_kw"]
+            s["avoidable_energy_cost_hourly"] = pwr["avoidable_energy_cost_hourly"]
+            s["optimal_plant_temp_c"] = pwr["optimal_plant_temp_c"]
+
             # Residuals
             s["ct_residual"] = round(live_ct - base_ct, 1)
             s["vib_residual"] = round(live_vib - base_vib, 2)
             s["temp_residual"] = round(live_temp - base_temp, 1)
+
 
             if status == "anomaly":
                 s["confidence_score"] = round(88.0 + random.uniform(-1.0, 1.0), 1)
@@ -621,13 +681,54 @@ class SimulationStreamer:
             "SELECT COUNT(*) as c FROM stations WHERE has_sensors=0"
         ).fetchone()["c"]
 
+        total_line_power_kw = round(sum(st.get("actual_power_kw", 0.0) for st in stations), 1)
+        optimal_line_power_kw = round(sum(st.get("min_achievable_power_kw", 0.0) for st in stations), 1)
+        total_avoidable_waste_kw = round(max(0.0, total_line_power_kw - optimal_line_power_kw), 1)
+        hourly_energy_waste_cost = round(total_avoidable_waste_kw * 0.12, 2)
+        daily_energy_waste_cost = round(hourly_energy_waste_cost * 24.0, 2)
+
+        # Top 3 Energy Drain Stations
+        sorted_drain = sorted(stations, key=lambda st: st.get("avoidable_waste_kw", 0.0), reverse=True)
+        top_energy_drain_stations = []
+        for ds in sorted_drain[:3]:
+            d_seq = ds["sequence_no"]
+            waste = ds.get("avoidable_waste_kw", 0.0)
+            cost_hr = ds.get("avoidable_energy_cost_hourly", 0.0)
+
+            if d_seq in TORQUE_STATIONS and ds.get("status") in {"warning", "anomaly"}:
+                rec = f"Recalibrate servo drive & joint coupling to eliminate {waste:.1f} kW friction loss"
+            elif ds.get("temp_residual", 0.0) > 3.0 or ds.get("temp_residual", 0.0) < -3.0:
+                rec = f"Optimize thermal insulation & chiller envelope to recover {waste:.1f} kW excess cooling draw"
+            elif ds.get("ct_residual", 0.0) > 4.0:
+                rec = f"Clear pneumatic throttling valve to eliminate {waste:.1f} kW idle wait draw"
+            else:
+                rec = f"Tune variable-frequency drive (VFD) profile to trim {waste:.1f} kW parasitic draw"
+
+            top_energy_drain_stations.append({
+                "station_id": ds["id"],
+                "name": ds["name"],
+                "sequence_no": d_seq,
+                "actual_power_kw": ds.get("actual_power_kw", 0.0),
+                "min_achievable_power_kw": ds.get("min_achievable_power_kw", 0.0),
+                "avoidable_waste_kw": waste,
+                "hourly_waste_cost": cost_hr,
+                "recommended_action": rec,
+            })
+
         kpis = {
             "active_line_velocity": active_vel,
             "fleet_defect_risk_pct": defect_risk,
             "blind_stations_inferred": blind_stations,
             "total_blind_stations": blind_stations,
             "total_units_in_buffer": 14,
+            "total_line_power_kw": total_line_power_kw,
+            "optimal_line_power_kw": optimal_line_power_kw,
+            "avoidable_waste_kw": total_avoidable_waste_kw,
+            "avoidable_energy_cost_hourly": hourly_energy_waste_cost,
+            "avoidable_energy_cost_daily": daily_energy_waste_cost,
+            "top_energy_drain_stations": top_energy_drain_stations,
         }
+
 
         GLOBAL_STATE["stations"] = stations
         GLOBAL_STATE["anomalies"] = anomalies_list
