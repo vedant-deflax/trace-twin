@@ -7,8 +7,9 @@ Run with:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes import stations, vehicles, anomalies, simulate, kpis, stream, actions
+from backend.api.routes import stations, vehicles, anomalies, simulate, kpis, stream, actions, ml
 from backend.simulator.streamer import streamer
+from backend.engine.inference import load_model_artifact
 import asyncio
 
 app = FastAPI(
@@ -28,6 +29,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
+    # Warm up ML pipeline
+    try:
+        art = load_model_artifact()
+        print(f"ML Model Pipeline loaded at startup. Test ROC-AUC: {art.get('metrics', {}).get('roc_auc')}")
+    except Exception as e:
+        print(f"Warning: Could not preload ML model: {e}")
+
     asyncio.create_task(streamer.start())
 
 # Mount routers
@@ -38,6 +46,7 @@ app.include_router(simulate.router, prefix="/api/v1")
 app.include_router(kpis.router, prefix="/api/v1")
 app.include_router(stream.router, prefix="/api/v1")
 app.include_router(actions.router, prefix="/api/v1")
+app.include_router(ml.router, prefix="/api/v1")
 
 
 

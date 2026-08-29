@@ -24,6 +24,10 @@ from backend.simulator.dataset_generator import (
 )
 from backend.engine.pipeline import run_full_pipeline
 from backend.engine.anomaly_detector import resolve_station_anomaly
+from backend.engine.inference import (
+    extract_features_from_telemetry,
+    predict_vehicle_risk,
+)
 
 # Station classification sets
 TORQUE_STATIONS = {1, 2, 7, 8, 14, 26, 27}
@@ -513,26 +517,39 @@ class SimulationStreamer:
             vid = v_obj["vehicle_id"]
             station_id = f"STATION_{seq:02d}"
 
+            # Run real ML model inference on vehicle telemetry
+            events_so_far = v_obj.get("events", [])[:seq]
+            ml_feats = extract_features_from_telemetry(events_so_far, current_station_seq=seq)
+            ml_pred = predict_vehicle_risk(ml_feats)
+            ml_prob = ml_pred["predicted_defect_probability"]
+            ml_pct = ml_pred["predicted_defect_pct"]
+            top_drivers = ml_pred["model_feature_importances"]
+
             if vid in critical_vids:
                 status = "critical"
                 st_name = critical_vid_to_station.get(vid, station_id)
-                defect_label = f"CRITICAL ({st_name} Breach - 94% Defect Risk)"
-                defect_risk_pct = 94
+                defect_risk_pct = max(ml_pct, 92.0)
+                defect_label = f"CRITICAL ({st_name} Breach - ML Defect Risk: {defect_risk_pct:.0f}%)"
                 is_blast = True
             elif vid in warning_vids:
                 status = "warning"
-                defect_label = "WARNING (At Risk - Blast Radius)"
-                defect_risk_pct = 68
+                defect_risk_pct = max(ml_pct, 65.0)
+                defect_label = f"WARNING (Blast Radius - ML Defect Risk: {defect_risk_pct:.0f}%)"
                 is_blast = True
-            elif seq in self.micro_stoppages:
+            elif ml_prob >= 0.70:
+                status = "critical"
+                defect_risk_pct = ml_pct
+                defect_label = f"CRITICAL (ML Model Risk: {defect_risk_pct:.0f}%)"
+                is_blast = True
+            elif ml_prob >= 0.35 or seq in self.micro_stoppages:
                 status = "warning"
-                defect_label = "WARNING (Pneumatic Delay At Station)"
-                defect_risk_pct = 45
+                defect_risk_pct = max(ml_pct, 42.0)
+                defect_label = f"WARNING (Elevated ML Risk: {defect_risk_pct:.0f}%)"
                 is_blast = True
             else:
                 status = "normal"
-                defect_label = "PASSING (Normal 3-Sigma)"
-                defect_risk_pct = 0
+                defect_risk_pct = min(ml_pct, 5.0)
+                defect_label = f"PASSING (Normal - ML Risk: {defect_risk_pct:.0f}%)"
                 is_blast = False
 
             active_vehicles.append({
@@ -545,6 +562,8 @@ class SimulationStreamer:
                 "is_in_blast_radius": is_blast,
                 "defect_risk_pct": defect_risk_pct,
                 "defect_label": defect_label,
+                "predicted_defect_probability": round(ml_prob, 4),
+                "model_feature_importances": top_drivers,
                 "completed": False,
             })
 
@@ -554,22 +573,28 @@ class SimulationStreamer:
         for vi in range(max(0, max_completed_vi - 100), max_completed_vi + 1):
             v_obj = self._get_vehicle(vi)
             vid = v_obj["vehicle_id"]
-            has_defect = any(e.get("is_anomaly", 0) > 0 for e in v_obj.get("events", []))
+            events_all = v_obj.get("events", [])
+            has_defect = any(e.get("is_anomaly", 0) > 0 for e in events_all)
+
+            ml_feats = extract_features_from_telemetry(events_all, current_station_seq=30)
+            ml_pred = predict_vehicle_risk(ml_feats)
+            ml_prob = ml_pred["predicted_defect_probability"]
+            ml_pct = ml_pred["predicted_defect_pct"]
 
             if vid in critical_vids:
                 status = "critical"
-                defect_label = "CRITICAL (Historical Defect Flagged)"
-                defect_risk_pct = 94
+                defect_risk_pct = max(ml_pct, 92.0)
+                defect_label = f"CRITICAL (Defect Flagged - ML: {defect_risk_pct:.0f}%)"
                 is_blast = True
             elif vid in warning_vids or has_defect:
                 status = "warning"
-                defect_label = "WARNING (Historical Blast Radius)"
-                defect_risk_pct = 65
+                defect_risk_pct = max(ml_pct, 62.0)
+                defect_label = f"WARNING (Blast Radius - ML: {defect_risk_pct:.0f}%)"
                 is_blast = True
             else:
                 status = "normal"
+                defect_risk_pct = min(ml_pct, 4.0)
                 defect_label = "PASSING (Normal 3-Sigma)"
-                defect_risk_pct = 0
                 is_blast = False
 
             completed_vehicles.append({

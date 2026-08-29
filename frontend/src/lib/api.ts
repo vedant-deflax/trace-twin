@@ -107,6 +107,8 @@ export interface VehicleListItem {
   station_count?: number;
   defect_label?: string;
   defect_risk_pct?: number;
+  predicted_defect_probability?: number;
+  model_feature_importances?: { feature: string; feature_label: string; importance_pct: number; observed_value: number }[];
 }
 
 export interface FactoryKPIs {

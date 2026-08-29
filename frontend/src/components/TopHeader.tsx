@@ -12,20 +12,20 @@ export function TopHeader() {
         <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-800">
           <button
             onClick={() => setPersona("supervisor")}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer ${
               persona === "supervisor"
-                ? "bg-cyan-500 text-white shadow-sm"
-                : "text-gray-400 hover:text-white"
+                ? "bg-cyan-500 text-white shadow-[0_0_15px_rgba(6,182,212,0.45)] ring-1 ring-cyan-400"
+                : "text-gray-400 hover:text-white hover:bg-white/5"
             }`}
           >
             Floor Supervisor
           </button>
           <button
             onClick={() => setPersona("manager")}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-all duration-200 cursor-pointer ${
               persona === "manager"
-                ? "bg-purple-500 text-white shadow-sm"
-                : "text-gray-400 hover:text-white"
+                ? "bg-purple-600 text-white shadow-[0_0_15px_rgba(168,85,247,0.45)] ring-1 ring-purple-400"
+                : "text-gray-400 hover:text-white hover:bg-white/5"
             }`}
           >
             Plant Manager
