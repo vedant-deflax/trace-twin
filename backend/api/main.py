@@ -19,9 +19,13 @@ app = FastAPI(
 )
 
 # CORS — allow all origins for hackathon
+# CORS — restrict to known frontend origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://your-production-frontend.example.com",  # replace with real deployed URL
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
