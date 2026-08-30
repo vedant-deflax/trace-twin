@@ -8,6 +8,11 @@ Generates 3 parametrized scenarios for each anomaly:
 
 import sqlite3
 
+# INR Economics
+SCRAP_COST_PER_CHASSIS_INR = 125000  # ₹1,25,000 per scrapped vehicle baseline
+LINE_DOWNTIME_COST_PER_MIN_INR = 1200  # ₹1,200 per minute downtime
+ELECTRICITY_RATE_PER_KWH_INR = 7.80  # ₹7.80 per kWh industrial grid tariff
+
 
 def compute_what_if(
     anomaly_id: int,

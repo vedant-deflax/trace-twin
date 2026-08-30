@@ -44,7 +44,7 @@ export default function WhatIfSimulatorPage() {
   const [coolantFlowRatePct, setCoolantFlowRatePct] = useState<number>(50);
 
   // Economic Baseline Constants
-  const costPerQuarantinedChassisINR = 45000; // ₹45,000 per scrapped chassis
+  const costPerQuarantinedChassisINR = 125000; // ₹1,25,000 per scrapped vehicle
   const lineDowntimeCostPerMinuteINR = 1200; // ₹1,200 per minute downtime
   const electricityRatePerKwhINR = 7.80; // ₹7.80 per kWh industrial grid tariff
 
@@ -422,7 +422,7 @@ export default function WhatIfSimulatorPage() {
           <div className="flex items-center gap-4 text-[11px] text-gray-500">
             <span>Base Vib: <strong className="text-gray-300">{baseStationVibration.toFixed(2)} mm/s</strong></span>
             <span>Base Temp: <strong className="text-gray-300">{baseStationTemp.toFixed(1)} °C</strong></span>
-            <span>Scrap Tariff: <strong className="text-gray-300">₹45,000/chassis</strong></span>
+            <span>Scrap Tariff: <strong className="text-gray-300">₹1,25,000/vehicle</strong></span>
             <span>Energy Tariff: <strong className="text-gray-300">₹7.80/kWh</strong></span>
           </div>
         </div>
@@ -760,7 +760,7 @@ export default function WhatIfSimulatorPage() {
                 {formatINR(results.potentialScrapLossINR)}
               </span>
               <span className="text-[10px] font-mono text-gray-500 mt-1 block">
-                {results.affectedChassisCount} Chassis &times; ₹45,000 &times; {results.defectRiskPct.toFixed(1)}%
+                {results.affectedChassisCount} Chassis &times; ₹1,25,000 &times; {results.defectRiskPct.toFixed(1)}%
               </span>
             </div>
 
