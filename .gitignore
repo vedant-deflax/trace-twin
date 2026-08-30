@@ -19,3 +19,7 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+backend/trace_twin.db
+*.db
+*.sqlite
+*.sqlite3
